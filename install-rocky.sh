@@ -376,14 +376,17 @@ EOF_CFG
   chown root:"$SERVICE_GROUP" "$CONFIG_DIR/pgintel.ini"
   chmod 0640 "$CONFIG_DIR/pgintel.ini"
 
-  local tmp
+  local tmp replace_source=0 replace_repo=0
+  [[ -n "$source_password" ]] && replace_source=1
+  [[ -n "$repo_password" ]] && replace_repo=1
   tmp="$(mktemp)"
   awk -F: -v h="$source_host" -v p="$source_port" -v d="$source_db" -v u="$source_user" \
     -v rh="$repo_host" -v rp="$repo_port" -v rd="$repo_db" -v ru="$repo_user" \
+    -v replace_source="$replace_source" -v replace_repo="$replace_repo" \
     'BEGIN{OFS=":"}
      /^#/ || NF < 5 {print; next}
-     ($1==h && $2==p && $3==d && $4==u) {next}
-     ($1==rh && $2==rp && $3==rd && $4==ru) {next}
+     (replace_source == 1 && $1==h && $2==p && $3==d && $4==u) {next}
+     (replace_repo == 1 && $1==rh && $2==rp && $3==rd && $4==ru) {next}
      {print}' "$CONFIG_DIR/pgpass" > "$tmp"
 
   cat "$tmp" > "$CONFIG_DIR/pgpass"
