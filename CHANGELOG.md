@@ -11,6 +11,7 @@
 - Do not reset passwords or role attributes of safe pre-existing roles; only required PG Intelligence grants are added.
 - Add RHEL-family 8/9/10 installer targeting; CentOS 7 is legacy/best-effort and Ubuntu/Debian remain out of scope.
 - On RHEL-family 8, select a Python 3.9+ runtime, validate `pyexpat`/OpenSSL, repair distro `expat`/Python 3.12 package mismatches, validate pip, and recover incomplete virtualenvs.
+- Detect a repository-shaped `pgintel` schema accidentally present in the monitored database and report it without deleting anything.
 - Add bootstrap safety unit tests.
 
 ## 0.1.4 - 2026-09-18
