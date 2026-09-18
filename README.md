@@ -1,4 +1,4 @@
-# PG Intelligence 0.1.3 — Prototype
+# PG Intelligence 0.1.4 — Prototype
 
 A deliberately small PostgreSQL telemetry collector and deterministic analyzer. It is the data foundation for future query advisors, plan regression analysis, anomaly detection and AI/ML experiments.
 
@@ -180,3 +180,36 @@ Apply `sql/002_monitoring_role.sql` once per monitored cluster and
 `sql/003_monitored_database.sql` in each monitored database. Initialize the
 repository with `sql/001_repository.sql`. The complete sequence is documented in
 `docs/SEMI_PRODUCTION_HOWTO.md`.
+
+
+## 0.1.4 production-safety profile
+
+Version 0.1.4 changes the daemon from a single 60-second all-inventory loop to three collection classes:
+
+```text
+FAST  60 s   server + database counters + pg_stat_statements counters
+SLOW  15 min table/index statistics
+SIZE  60 min database/table/index physical sizes
+```
+
+The default statement path calls `pg_stat_statements(false)` and therefore does not retrieve SQL text. Configure `[collection] query_text_mode = events` to retrieve text only for a detected query-regression event, or `all` only when full query-text retention is explicitly required.
+
+A soft source-side budget skips optional SLOW/SIZE work when FAST monitoring itself is taking too long. The new `health` command makes the observer effect measurable:
+
+```bash
+pgintel -c /etc/pgintel/pgintel.ini health --hours 24
+```
+
+`pgintel collect` is FAST-only by default. Use an explicit full inventory when desired:
+
+```bash
+pgintel -c /etc/pgintel/pgintel.ini collect --full
+```
+
+Existing 0.1.3 repositories require the idempotent telemetry-repository migration before the service is restarted:
+
+```bash
+pgintel -c /etc/pgintel/pgintel.ini migrate-repository
+```
+
+See `docs/PRODUCTION_SAFETY.md` for deployment guidance and the exact overhead controls.

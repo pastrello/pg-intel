@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 
-def collect(conn):
-    with conn.cursor() as cur:
-        cur.execute(
-            """
+def _build_select(*, include_size: bool = False) -> str:
+    size_expr = "pg_relation_size(i.indexrelid)" if include_size else "NULL::bigint"
+    return f"""
             SELECT
                 i.relid,
                 i.indexrelid,
@@ -14,7 +13,7 @@ def collect(conn):
                 i.idx_scan,
                 i.idx_tup_read,
                 i.idx_tup_fetch,
-                pg_relation_size(i.indexrelid) AS index_size_bytes,
+                {size_expr} AS index_size_bytes,
                 ix.indisunique,
                 ix.indisprimary,
                 ix.indisvalid
@@ -22,5 +21,9 @@ def collect(conn):
             JOIN pg_index ix ON ix.indexrelid = i.indexrelid
             ORDER BY i.schemaname, i.relname, i.indexrelname
             """
-        )
+
+
+def collect(conn, *, include_size: bool = False):
+    with conn.cursor() as cur:
+        cur.execute(_build_select(include_size=include_size))
         return cur.fetchall()

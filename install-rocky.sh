@@ -7,7 +7,7 @@ set -Eeuo pipefail
 #   - does not start a new service unless --enable is supplied
 #   - keeps DB passwords out of pgintel.ini via PGPASSFILE
 
-VERSION="0.1.3"
+VERSION="0.1.4"
 PREFIX="${PREFIX:-/opt/pg-intelligence}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/pgintel}"
 STATE_DIR="${STATE_DIR:-/var/lib/pgintel}"
@@ -23,6 +23,7 @@ ENABLE_SERVICE=0
 FORCE_CONFIG=0
 RUN_TESTS=1
 ASSESS_CAPABILITIES=0
+MIGRATE_REPOSITORY=0
 
 log() { printf '[pgintel-installer] %s\n' "$*"; }
 warn() { printf '[pgintel-installer] WARNING: %s\n' "$*" >&2; }
@@ -42,6 +43,9 @@ Options:
                     the systemd service.
   --assess          Detect PostgreSQL version/capabilities and print missing
                     monitoring versus the PostgreSQL 18 baseline.
+  --migrate-repository
+                    Apply the idempotent PG Intelligence repository migration
+                    required by 0.1.4. Never alters the monitored source DB.
   --force-config    Replace an existing pgintel.ini with the example/default.
                     A timestamped backup is created first.
   --no-dnf          Do not install missing OS packages with dnf.
@@ -64,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     --configure) INTERACTIVE_CONFIG=1 ;;
     --enable) ENABLE_SERVICE=1 ;;
     --assess) ASSESS_CAPABILITIES=1 ;;
+    --migrate-repository) MIGRATE_REPOSITORY=1 ;;
     --force-config) FORCE_CONFIG=1 ;;
     --no-dnf) INSTALL_DEPS=0 ;;
     --skip-tests) RUN_TESTS=0 ;;
@@ -278,6 +283,12 @@ instance_name = $instance
 interval_seconds = 60
 store_query_text = false
 
+[collection]
+slow_interval_seconds = 900
+size_interval_seconds = 3600
+max_source_cycle_seconds = 20
+query_text_mode = none
+
 [source]
 dsn = host=$source_host port=$source_port dbname=$source_db user=$source_user connect_timeout=5 application_name=pgintel-agent
 $( [[ "$source_expected_major" != "auto" ]] && printf 'expected_major = %s\n' "$source_expected_major" )
@@ -330,6 +341,12 @@ run_tests() {
   "$PREFIX/venv/bin/python" -m unittest discover -s "$PREFIX/tests" -q
 }
 
+migrate_repository_schema() {
+  log "Applying PG Intelligence repository migration 0.1.4"
+  runuser -u "$SERVICE_USER" -- env PGPASSFILE="$CONFIG_DIR/pgpass" \
+    "$PREFIX/venv/bin/pgintel" -c "$CONFIG_DIR/pgintel.ini" migrate-repository
+}
+
 assess_capabilities() {
   log "Assessing PostgreSQL version and monitoring capabilities"
   if runuser -u "$SERVICE_USER" -- env PGPASSFILE="$CONFIG_DIR/pgpass" \
@@ -362,6 +379,10 @@ install_python
 write_systemd_unit
 (( INTERACTIVE_CONFIG == 1 )) && configure_interactively
 run_tests
+
+if (( MIGRATE_REPOSITORY == 1 )); then
+  migrate_repository_schema
+fi
 
 if (( ASSESS_CAPABILITIES == 1 || INTERACTIVE_CONFIG == 1 )); then
   assess_capabilities || true
@@ -396,16 +417,22 @@ Paths:
 Next steps if this is a new installation:
   1. Apply the PostgreSQL SQL steps in the HOW-TO.
   2. Review $CONFIG_DIR/pgintel.ini and $CONFIG_DIR/pgpass.
-  3. Assess PostgreSQL version/capabilities:
+  3. On upgrades from 0.1.3 or older, migrate the telemetry repository:
+       sudo -u $SERVICE_USER env PGPASSFILE=$CONFIG_DIR/pgpass \
+         $PREFIX/venv/bin/pgintel -c $CONFIG_DIR/pgintel.ini migrate-repository
+  4. Assess PostgreSQL version/capabilities:
        sudo -u $SERVICE_USER env PGPASSFILE=$CONFIG_DIR/pgpass \
          $PREFIX/venv/bin/pgintel -c $CONFIG_DIR/pgintel.ini capabilities
-  4. Validate:
+  5. Validate:
        sudo -u $SERVICE_USER env PGPASSFILE=$CONFIG_DIR/pgpass \
          $PREFIX/venv/bin/pgintel -c $CONFIG_DIR/pgintel.ini check
-  5. First manual collection:
+  6. First production-safe manual collection (FAST only):
        sudo -u $SERVICE_USER env PGPASSFILE=$CONFIG_DIR/pgpass \
          $PREFIX/venv/bin/pgintel -c $CONFIG_DIR/pgintel.ini collect
-  6. Enable when ready:
+  7. Optional one-off full inventory (includes relation sizes):
+       sudo -u $SERVICE_USER env PGPASSFILE=$CONFIG_DIR/pgpass \
+         $PREFIX/venv/bin/pgintel -c $CONFIG_DIR/pgintel.ini collect --full
+  8. Enable when ready:
        systemctl enable --now $SERVICE_NAME
 
 The installer intentionally does not ALTER the monitored PostgreSQL cluster.

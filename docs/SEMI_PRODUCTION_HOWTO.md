@@ -276,3 +276,39 @@ was already active, the installer runs a validation and restarts it only when
 the validation succeeds.
 
 No repository schema migration is required when upgrading from 0.1.1/0.1.2 to 0.1.3.
+
+
+## Upgrade to 0.1.4 production-safety profile
+
+After installing/updating the code, existing 0.1.3 and earlier telemetry repositories need the new collector-health table:
+
+```bash
+sudo -u pgintel env PGPASSFILE=/etc/pgintel/pgpass \
+  /opt/pg-intelligence/venv/bin/pgintel -c /etc/pgintel/pgintel.ini migrate-repository
+```
+
+Then validate:
+
+```bash
+sudo -u pgintel env PGPASSFILE=/etc/pgintel/pgpass \
+  /opt/pg-intelligence/venv/bin/pgintel -c /etc/pgintel/pgintel.ini check
+```
+
+The 0.1.4 defaults are intentionally conservative for a busy production source. Existing INI files do not need a new section because these values are built-in defaults; adding them explicitly is recommended for clarity:
+
+```ini
+[collection]
+slow_interval_seconds = 900
+size_interval_seconds = 3600
+max_source_cycle_seconds = 20
+query_text_mode = none
+```
+
+A normal manual collection is now FAST-only:
+
+```bash
+sudo -u pgintel env PGPASSFILE=/etc/pgintel/pgpass \
+  /opt/pg-intelligence/venv/bin/pgintel -c /etc/pgintel/pgintel.ini collect
+```
+
+Use `collect --full` only when you deliberately want table/index inventory plus physical size calculations.

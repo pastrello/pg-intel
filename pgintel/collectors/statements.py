@@ -4,17 +4,8 @@ from typing import Iterable
 
 
 _REQUIRED_COLUMNS = {
-    "dbid",
-    "userid",
-    "queryid",
-    "query",
-    "calls",
-    "total_exec_time",
-    "rows",
-    "shared_blks_hit",
-    "shared_blks_read",
-    "temp_blks_read",
-    "temp_blks_written",
+    "dbid", "userid", "queryid", "calls", "total_exec_time", "rows",
+    "shared_blks_hit", "shared_blks_read", "temp_blks_read", "temp_blks_written",
 }
 
 
@@ -25,11 +16,6 @@ def extension_available(conn) -> bool:
 
 
 def available_columns(conn) -> set[str]:
-    """Return the columns exposed by the installed pg_stat_statements view.
-
-    PostgreSQL occasionally renames/adds pg_stat_statements columns.  Reading the
-    actual view definition makes the collector tolerant of those differences.
-    """
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -52,60 +38,38 @@ def _expr(columns: set[str], preferred: str, alias: str, *, fallback: str | None
     return f"{default_sql} AS {alias}"
 
 
-def _build_select(columns: Iterable[str]) -> str:
+def _build_select(columns: Iterable[str], *, include_query_text: bool = False) -> str:
     columns = set(columns)
     missing = sorted(_REQUIRED_COLUMNS - columns)
     if missing:
-        raise RuntimeError(
-            "pg_stat_statements is missing required columns: " + ", ".join(missing)
-        )
+        raise RuntimeError("pg_stat_statements is missing required columns: " + ", ".join(missing))
 
-    # PostgreSQL 17 renamed blk_read_time/blk_write_time to
-    # shared_blk_read_time/shared_blk_write_time in pg_stat_statements.
-    # Keep stable aliases for the rest of PG Intelligence.
     shared_read = _expr(
-        columns,
-        "shared_blk_read_time",
-        "blk_read_time",
-        fallback="blk_read_time",
+        columns, "shared_blk_read_time", "blk_read_time", fallback="blk_read_time",
         default_sql="0::double precision",
     )
     shared_write = _expr(
-        columns,
-        "shared_blk_write_time",
-        "blk_write_time",
-        fallback="blk_write_time",
+        columns, "shared_blk_write_time", "blk_write_time", fallback="blk_write_time",
         default_sql="0::double precision",
     )
-
     optional = {
         "toplevel": _expr(columns, "toplevel", "toplevel", default_sql="true"),
         "plans": _expr(columns, "plans", "plans", default_sql="0::bigint"),
-        "total_plan_time": _expr(
-            columns, "total_plan_time", "total_plan_time", default_sql="0::double precision"
-        ),
-        "shared_blks_dirtied": _expr(
-            columns, "shared_blks_dirtied", "shared_blks_dirtied", default_sql="0::bigint"
-        ),
-        "shared_blks_written": _expr(
-            columns, "shared_blks_written", "shared_blks_written", default_sql="0::bigint"
-        ),
+        "total_plan_time": _expr(columns, "total_plan_time", "total_plan_time", default_sql="0::double precision"),
+        "shared_blks_dirtied": _expr(columns, "shared_blks_dirtied", "shared_blks_dirtied", default_sql="0::bigint"),
+        "shared_blks_written": _expr(columns, "shared_blks_written", "shared_blks_written", default_sql="0::bigint"),
         "local_blks_hit": _expr(columns, "local_blks_hit", "local_blks_hit", default_sql="0::bigint"),
         "local_blks_read": _expr(columns, "local_blks_read", "local_blks_read", default_sql="0::bigint"),
-        "temp_blk_read_time": _expr(
-            columns, "temp_blk_read_time", "temp_blk_read_time", default_sql="0::double precision"
-        ),
-        "temp_blk_write_time": _expr(
-            columns, "temp_blk_write_time", "temp_blk_write_time", default_sql="0::double precision"
-        ),
+        "temp_blk_read_time": _expr(columns, "temp_blk_read_time", "temp_blk_read_time", default_sql="0::double precision"),
+        "temp_blk_write_time": _expr(columns, "temp_blk_write_time", "temp_blk_write_time", default_sql="0::double precision"),
         "wal_records": _expr(columns, "wal_records", "wal_records", default_sql="0::bigint"),
         "wal_fpi": _expr(columns, "wal_fpi", "wal_fpi", default_sql="0::bigint"),
         "wal_bytes": _expr(columns, "wal_bytes", "wal_bytes", default_sql="0::numeric"),
         "jit_functions": _expr(columns, "jit_functions", "jit_functions", default_sql="0::bigint"),
-        "jit_generation_time": _expr(
-            columns, "jit_generation_time", "jit_generation_time", default_sql="0::double precision"
-        ),
+        "jit_generation_time": _expr(columns, "jit_generation_time", "jit_generation_time", default_sql="0::double precision"),
     }
+    query_expr = "s.query" if include_query_text else "NULL::text"
+    source = "pg_stat_statements(true)" if include_query_text else "pg_stat_statements(false)"
 
     return f"""
         SELECT
@@ -113,7 +77,7 @@ def _build_select(columns: Iterable[str]) -> str:
             s.userid,
             s.queryid,
             {optional['toplevel']},
-            s.query,
+            {query_expr} AS query,
             {optional['plans']},
             {optional['total_plan_time']},
             s.calls,
@@ -136,7 +100,7 @@ def _build_select(columns: Iterable[str]) -> str:
             {optional['wal_bytes']},
             {optional['jit_functions']},
             {optional['jit_generation_time']}
-        FROM pg_stat_statements s
+        FROM {source} AS s
         WHERE s.queryid IS NOT NULL
     """
 
@@ -158,9 +122,31 @@ def compatibility_info(conn) -> dict:
     }
 
 
-def collect(conn):
+def collect(conn, *, include_query_text: bool = False):
     columns = available_columns(conn)
-    sql = _build_select(columns)
+    sql = _build_select(columns, include_query_text=include_query_text)
     with conn.cursor() as cur:
         cur.execute(sql)
         return cur.fetchall()
+
+
+def fetch_query_texts(conn, keys: set[tuple[int, int, int]]) -> dict[tuple[int, int, int], str]:
+    if not keys:
+        return {}
+    clauses = []
+    params: list[int] = []
+    for dbid, userid, queryid in sorted(keys):
+        clauses.append("(s.dbid=%s AND s.userid=%s AND s.queryid=%s)")
+        params.extend((dbid, userid, queryid))
+    sql = f"""
+        SELECT s.dbid, s.userid, s.queryid, s.query
+        FROM pg_stat_statements(true) AS s
+        WHERE {' OR '.join(clauses)}
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, tuple(params))
+        return {
+            (int(row["dbid"]), int(row["userid"]), int(row["queryid"])): row["query"]
+            for row in cur.fetchall()
+            if row.get("query")
+        }

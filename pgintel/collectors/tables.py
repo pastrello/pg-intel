@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 
-def collect(conn):
-    with conn.cursor() as cur:
-        cur.execute(
-            """
+def _build_select(*, include_size: bool = False) -> str:
+    size_expr = "pg_total_relation_size(s.relid)" if include_size else "NULL::bigint"
+    return f"""
             SELECT
                 s.relid,
                 s.schemaname,
@@ -28,9 +27,13 @@ def collect(conn):
                 s.autovacuum_count,
                 s.analyze_count,
                 s.autoanalyze_count,
-                pg_total_relation_size(s.relid) AS total_size_bytes
+                {size_expr} AS total_size_bytes
             FROM pg_stat_user_tables s
             ORDER BY s.schemaname, s.relname
             """
-        )
+
+
+def collect(conn, *, include_size: bool = False):
+    with conn.cursor() as cur:
+        cur.execute(_build_select(include_size=include_size))
         return cur.fetchall()

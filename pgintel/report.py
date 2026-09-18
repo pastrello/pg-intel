@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import timedelta
-
 from .util import human_bytes
 
 
@@ -15,14 +13,12 @@ def text_report(conn, instance_name: str, hours: int = 24) -> str:
 
         cur.execute(
             """
-            SELECT
-                COALESCE(sum(xact_commit_delta + xact_rollback_delta),0) AS tx,
-                COALESCE(sum(temp_bytes_delta),0) AS temp_bytes,
-                COALESCE(sum(deadlocks_delta),0) AS deadlocks
+            SELECT COALESCE(sum(xact_commit_delta + xact_rollback_delta),0) AS tx,
+                   COALESCE(sum(temp_bytes_delta),0) AS temp_bytes,
+                   COALESCE(sum(deadlocks_delta),0) AS deadlocks
             FROM pgintel.database_samples
             WHERE instance_id=%s AND collected_at >= now() - (%s * interval '1 hour')
-            """,
-            (iid, hours),
+            """, (iid, hours),
         )
         db = cur.fetchone()
 
@@ -32,12 +28,9 @@ def text_report(conn, instance_name: str, hours: int = 24) -> str:
                    CASE WHEN sum(calls_delta)>0 THEN sum(total_exec_time_delta)/sum(calls_delta) END mean_ms
             FROM pgintel.query_samples
             WHERE instance_id=%s AND collected_at >= now() - (%s * interval '1 hour')
-            GROUP BY queryid
-            HAVING sum(calls_delta) > 0
-            ORDER BY total_ms DESC
-            LIMIT 10
-            """,
-            (iid, hours),
+            GROUP BY queryid HAVING sum(calls_delta) > 0
+            ORDER BY total_ms DESC LIMIT 10
+            """, (iid, hours),
         )
         top = cur.fetchall()
 
@@ -46,34 +39,28 @@ def text_report(conn, instance_name: str, hours: int = 24) -> str:
             SELECT created_at, severity, event_type, title
             FROM pgintel.events
             WHERE instance_id=%s AND created_at >= now() - (%s * interval '1 hour')
-            ORDER BY created_at DESC
-            LIMIT 20
-            """,
-            (iid, hours),
+            ORDER BY created_at DESC LIMIT 20
+            """, (iid, hours),
         )
         events = cur.fetchall()
 
     lines = [
-        "PG Intelligence 0.1 - Report",
+        "PG Intelligence - Report",
         f"Instance : {inst['name']}",
         f"Version  : {inst['server_version']}",
-        f"Window   : last {hours} hour(s)",
-        "",
-        "WORKLOAD",
+        f"Window   : last {hours} hour(s)", "", "WORKLOAD",
         f"  Transactions : {int(db['tx']):,}",
         f"  Temp written : {human_bytes(db['temp_bytes'])}",
-        f"  Deadlocks    : {int(db['deadlocks'])}",
-        "",
-        "TOP QUERIES BY EXECUTION TIME",
+        f"  Deadlocks    : {int(db['deadlocks'])}", "", "TOP QUERIES BY EXECUTION TIME",
     ]
     if top:
         for r in top:
             lines.append(
-                f"  queryid={r['queryid']} calls={int(r['calls']):,} total={float(r['total_ms'])/1000:.2f}s mean={float(r['mean_ms']):.2f}ms"
+                f"  queryid={r['queryid']} calls={int(r['calls']):,} "
+                f"total={float(r['total_ms'])/1000:.2f}s mean={float(r['mean_ms']):.2f}ms"
             )
     else:
-        lines.append("  (no query delta data yet; the first sample establishes the baseline)")
-
+        lines.append("  (no query delta data yet)")
     lines.extend(["", "RECENT EVENTS"])
     if events:
         for e in events:
@@ -81,3 +68,54 @@ def text_report(conn, instance_name: str, hours: int = 24) -> str:
     else:
         lines.append("  No events in this window.")
     return "\n".join(lines)
+
+
+def health_report(conn, instance_name: str, hours: int = 24) -> str:
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, name FROM pgintel.instances WHERE name=%s", (instance_name,))
+        inst = cur.fetchone()
+        if not inst:
+            raise ValueError(f"Unknown instance: {instance_name}")
+        cur.execute(
+            """
+            SELECT
+                count(*) AS cycles,
+                avg(cycle_duration_ms) AS avg_cycle_ms,
+                max(cycle_duration_ms) AS max_cycle_ms,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY cycle_duration_ms) AS p95_cycle_ms,
+                avg(source_duration_ms) AS avg_source_ms,
+                max(source_duration_ms) AS max_source_ms,
+                avg(repository_duration_ms) AS avg_repository_ms,
+                sum(query_rows_seen) AS query_rows_seen,
+                sum(query_rows_stored) AS query_rows_stored,
+                count(*) FILTER (WHERE budget_exceeded) AS budget_exceeded_cycles,
+                count(*) FILTER (WHERE slow_collected) AS slow_cycles,
+                count(*) FILTER (WHERE sizes_collected) AS size_cycles
+            FROM pgintel.collection_cycles
+            WHERE instance_id=%s AND collected_at >= now() - (%s * interval '1 hour')
+            """,
+            (inst["id"], hours),
+        )
+        r = cur.fetchone()
+    if not r["cycles"]:
+        return (
+            f"PG Intelligence - Collector Health\nInstance : {instance_name}\n"
+            f"No collection cycles in the last {hours} hour(s)."
+        )
+    seen = int(r["query_rows_seen"] or 0)
+    stored = int(r["query_rows_stored"] or 0)
+    reduction = (1.0 - stored / seen) * 100.0 if seen else 0.0
+    return "\n".join([
+        "PG Intelligence - Collector Health",
+        f"Instance              : {instance_name}",
+        f"Window                : last {hours} hour(s)",
+        f"Cycles                : {int(r['cycles'])}",
+        f"Cycle avg / p95 / max : {float(r['avg_cycle_ms']):.1f} / {float(r['p95_cycle_ms']):.1f} / {float(r['max_cycle_ms']):.1f} ms",
+        f"Source avg / max      : {float(r['avg_source_ms']):.1f} / {float(r['max_source_ms']):.1f} ms",
+        f"Repository avg        : {float(r['avg_repository_ms']):.1f} ms",
+        f"Budget exceeded       : {int(r['budget_exceeded_cycles'])} cycle(s)",
+        f"Slow / size cycles    : {int(r['slow_cycles'])} / {int(r['size_cycles'])}",
+        f"Statements seen       : {seen:,}",
+        f"Statements stored     : {stored:,}",
+        f"Unchanged-row reduction: {reduction:.1f}%",
+    ])

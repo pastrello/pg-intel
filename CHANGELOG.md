@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.4 - 2026-09-18
+
+- Add a production-safety collection scheduler: FAST 60s, SLOW 15min and SIZE 60min by default.
+- Use `pg_stat_statements(false)` by default so query text is not repeatedly read from the source.
+- Add `query_text_mode = none|events|all`; default is `none` and `events` retrieves text only for query-regression events.
+- Move `pg_database_size`, `pg_total_relation_size` and `pg_relation_size` to SIZE cycles only.
+- Carry the last known relation/database size forward in repository samples between SIZE cycles.
+- Stop persisting unchanged `pg_stat_statements` rows after the first baseline, reducing repository growth.
+- Add a soft source collector budget; optional SLOW/SIZE work is skipped when FAST collection consumes it.
+- Add `pgintel health` and `pgintel.collection_cycles` to measure collector overhead and row reduction.
+- Add idempotent `pgintel migrate-repository` and `sql/004_production_safety.sql` for upgrades.
+- Make `pgintel collect` FAST-only by default; `collect --full` explicitly includes object and size inventory.
+- Expand the unit-test suite to 33 tests.
+
+
 ## 0.1.3 - 2026-09-18
 
 - Add validated source compatibility for PostgreSQL 13 through 18.

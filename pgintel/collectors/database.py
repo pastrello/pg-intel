@@ -8,7 +8,6 @@ _REQUIRED_COLUMNS = {
 }
 
 _OPTIONAL_COLUMNS = {
-    # PostgreSQL 14+
     "session_time": "0::double precision",
     "active_time": "0::double precision",
     "idle_in_transaction_time": "0::double precision",
@@ -16,7 +15,6 @@ _OPTIONAL_COLUMNS = {
     "sessions_abandoned": "0::bigint",
     "sessions_fatal": "0::bigint",
     "sessions_killed": "0::bigint",
-    # PostgreSQL 18+
     "parallel_workers_to_launch": "0::bigint",
     "parallel_workers_launched": "0::bigint",
 }
@@ -59,11 +57,12 @@ def _expr(columns: set[str], name: str) -> str:
     return f"{_OPTIONAL_COLUMNS[name]} AS {name}"
 
 
-def _build_select(columns: set[str]) -> str:
+def _build_select(columns: set[str], *, include_size: bool = False) -> str:
     missing = sorted(_REQUIRED_COLUMNS - columns)
     if missing:
         raise RuntimeError("pg_stat_database is missing required columns: " + ", ".join(missing))
     optional = ",\n                ".join(_expr(columns, name) for name in _OPTIONAL_COLUMNS)
+    size_expr = "pg_database_size(d.datid)" if include_size else "NULL::bigint"
     return f"""
             SELECT
                 d.datid,
@@ -86,15 +85,15 @@ def _build_select(columns: set[str]) -> str:
                 d.blk_write_time,
                 {optional},
                 d.stats_reset,
-                pg_database_size(d.datid) AS database_size_bytes
+                {size_expr} AS database_size_bytes
             FROM pg_stat_database d
             WHERE d.datname IS NOT NULL
             ORDER BY d.datname
             """
 
 
-def collect(conn):
+def collect(conn, *, include_size: bool = False):
     columns = available_columns(conn)
     with conn.cursor() as cur:
-        cur.execute(_build_select(columns))
+        cur.execute(_build_select(columns, include_size=include_size))
         return cur.fetchall()
