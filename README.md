@@ -237,4 +237,6 @@ The bootstrap intentionally stops instead of making risky assumptions when:
 - an existing PG Intelligence role has elevated attributes;
 - an existing repository database is owned by another role.
 
+If a repository-shaped `pgintel.instances` table is detected inside the monitored source database, bootstrap reports it as a manual cleanup item and never removes it automatically.
+
 The remaining manual PostgreSQL step is `pg_stat_statements` preload/restart/extension creation.
