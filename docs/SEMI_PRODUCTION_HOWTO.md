@@ -1,9 +1,20 @@
-# PG Intelligence 0.1.3 — Semi-production HOW-TO
+# PG Intelligence 0.1.5 — Semi-production HOW-TO
 
-This procedure keeps the monitored PostgreSQL side read-only and separates it
-from the telemetry repository.
+This procedure keeps application objects untouched, gives the source agent only observation privileges, and stores telemetry in a separate PostgreSQL database.
 
-## 1. Install the agent host
+## 1. Supported installer platforms
+
+The 0.1.5 installer targets the RHEL family:
+
+- Rocky Linux 8, 9 and 10
+- RHEL 8, 9 and 10
+- AlmaLinux 8, 9 and 10 by compatible packaging
+- CentOS 7: legacy/best-effort only
+- Ubuntu/Debian: not an installer target yet
+
+On RHEL-family 8 the installer selects Python 3.9+ (preferring an already usable runtime), validates `ssl`, `pyexpat`, pip and venv, and can repair the Python 3.12/Expat partial-update condition through distro RPMs.
+
+## 2. Guided installation
 
 From the extracted project directory:
 
@@ -11,180 +22,138 @@ From the extracted project directory:
 sudo ./install-rocky.sh --configure
 ```
 
-The installer creates:
+The installer creates/maintains:
 
-- `/opt/pg-intelligence` — application + virtualenv
-- `/etc/pgintel/pgintel.ini` — DSNs without passwords (`0640 root:pgintel`)
-- `/etc/pgintel/pgpass` — source/repository passwords (`0600 pgintel:pgintel`)
-- `/var/lib/pgintel` — service state/home
-- `/var/log/pgintel` — reserved application log directory
-- `/etc/systemd/system/pgintel.service`
+```text
+/opt/pg-intelligence
+/etc/pgintel/pgintel.ini
+/etc/pgintel/pgpass
+/var/lib/pgintel
+/var/log/pgintel
+/etc/systemd/system/pgintel.service
+```
 
-It does **not** modify or restart PostgreSQL and does **not** start a new agent by
-default.
+It asks for two ordinary service connections:
 
-## 2. Prepare the monitored PostgreSQL cluster
+```text
+SOURCE
+  host / port / monitored database / monitoring role
 
-### 2.1 Confirm `pg_stat_statements` preload
+REPOSITORY
+  host / port / repository database / repository role
+```
 
-As a PostgreSQL administrator:
+Passwords for those service roles are stored only in `/etc/pgintel/pgpass` with mode `0600`.
+
+At the end of `--configure`, the installer asks:
+
+```text
+Bootstrap PG Intelligence roles/repository now? [Y/n]:
+```
+
+Accepting this prompt asks for PostgreSQL administrative credentials. Administrative passwords are used only by that bootstrap process and are not written to `pgintel.ini`, `pgpass`, or command-line arguments.
+
+## 3. What bootstrap creates
+
+The bootstrap is idempotent.
+
+### Monitored/source PostgreSQL
+
+If needed it creates the configured monitoring role (normally `pgintel`) as a non-privileged LOGIN role, with conservative read-only/time-out settings.
+
+It ensures:
+
+```text
+GRANT pg_monitor
+GRANT CONNECT on the configured monitored database
+```
+
+If the role already exists, its password and role attributes are not reset. The bootstrap validates that it is a LOGIN role and refuses to take over a pre-existing role with `SUPERUSER`, `CREATEDB`, `CREATEROLE`, `REPLICATION` or `BYPASSRLS`.
+
+### Repository PostgreSQL
+
+If needed it creates:
+
+```text
+role:     pgintel_repo
+database: pgintel
+owner:    pgintel_repo
+schema:   pgintel
+tables:   instances, samples, events, collection_cycles, ...
+```
+
+It then applies all repository migrations known by the installed version.
+
+If a database with the configured repository name already exists but belongs to a different owner, bootstrap stops instead of changing ownership.
+
+### Separation guard
+
+Source and repository must not be the same configured database.
+
+For example, this is correct:
+
+```ini
+[source]
+dsn = host=127.0.0.1 port=15333 dbname=erp user=pgintel ...
+
+[repository]
+dsn = host=127.0.0.1 port=15333 dbname=pgintel user=pgintel_repo ...
+```
+
+This is refused:
+
+```text
+source     -> 127.0.0.1:15333 / erp
+repository -> 127.0.0.1:15333 / erp
+```
+
+The guard exists specifically to prevent telemetry schema creation inside the application database.
+
+## 4. Manual pg_stat_statements step
+
+This remains manual because `shared_preload_libraries` may require a PostgreSQL restart.
+
+Check:
 
 ```sql
 SHOW shared_preload_libraries;
 ```
 
-If `pg_stat_statements` is not listed, add it to the PostgreSQL configuration,
-for example:
-
-```conf
-shared_preload_libraries = 'pg_stat_statements'
-```
-
-If other libraries already exist, preserve them, for example:
+If `pg_stat_statements` is missing, add it while preserving existing libraries:
 
 ```conf
 shared_preload_libraries = 'pgaudit,pg_stat_statements'
 ```
 
-A change to `shared_preload_libraries` requires a PostgreSQL restart. Plan this
-for an approved maintenance window.
+Restart PostgreSQL only in an approved maintenance window.
 
-### 2.2 Create/harden the monitoring role (once per cluster)
-
-From the agent package, run as a PostgreSQL administrator:
-
-```bash
-psql -h SOURCE_HOST -p 5432 -U postgres -d postgres \
-  -f /opt/pg-intelligence/sql/002_monitoring_role.sql
-```
-
-Then set the role password according to your authentication policy. Example:
-
-```bash
-psql -h SOURCE_HOST -p 5432 -U postgres -d postgres
-```
+Then, in the monitored database:
 
 ```sql
-\password pgintel
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 ```
 
-The script grants `pg_monitor` and additionally forces the role to read-only,
-with conservative statement/lock/idle transaction timeouts.
+The installer reports whether preload and extension are already present, but it does not change either one.
 
-### 2.3 Enable the extension in the database being monitored
+## 5. Rerun bootstrap without rewriting configuration
 
-Run once in each monitored database:
+After `pgintel.ini` already exists:
 
 ```bash
-psql -h SOURCE_HOST -p 5432 -U postgres -d erp \
-  -f /opt/pg-intelligence/sql/003_monitored_database.sql
+sudo ./install-rocky.sh --bootstrap-postgres
 ```
 
-Verify:
+This is useful after an upgrade or when a repository object was not yet initialized.
+
+The older explicit repository-only migration remains available:
 
 ```bash
-psql -h SOURCE_HOST -p 5432 -U postgres -d erp -c \
-  "SELECT extname, extversion FROM pg_extension WHERE extname='pg_stat_statements';"
+sudo ./install-rocky.sh --migrate-repository
 ```
 
-Optional direct validation as the monitoring user:
+## 6. Validate
 
-```bash
-PGPASSWORD='TEMPORARY_TEST_ONLY' psql -h SOURCE_HOST -p 5432 -U pgintel -d erp \
-  -c "SELECT count(*) FROM pg_stat_statements;"
-```
-
-Avoid `PGPASSWORD` in routine operation; it is shown only as a one-off test.
-The systemd service uses `/etc/pgintel/pgpass` instead.
-
-## 3. Prepare the repository PostgreSQL
-
-The repository may be on the agent host or on a separate PostgreSQL instance.
-As an administrator of the repository server:
-
-```sql
-CREATE ROLE pgintel_repo LOGIN PASSWORD 'USE_A_REAL_PASSWORD';
-CREATE DATABASE pgintel OWNER pgintel_repo;
-```
-
-Then initialize the schema while connected **as `pgintel_repo`** (or another
-owner with equivalent rights):
-
-```bash
-psql -h REPOSITORY_HOST -p 5432 -U pgintel_repo -d pgintel \
-  -f /opt/pg-intelligence/sql/001_repository.sql
-```
-
-Verify:
-
-```bash
-psql -h REPOSITORY_HOST -p 5432 -U pgintel_repo -d pgintel -c \
-  "SELECT tablename FROM pg_tables WHERE schemaname='pgintel' ORDER BY tablename;"
-```
-
-## 4. Review agent connection configuration
-
-```bash
-sudo cat /etc/pgintel/pgintel.ini
-sudo -u pgintel cat /etc/pgintel/pgpass
-```
-
-Expected source DSN shape:
-
-```ini
-[source]
-dsn = host=SOURCE_HOST port=5432 dbname=erp user=pgintel connect_timeout=5 application_name=pgintel-agent
-```
-
-Expected repository DSN shape:
-
-```ini
-[repository]
-dsn = host=REPOSITORY_HOST port=5432 dbname=pgintel user=pgintel_repo connect_timeout=5 application_name=pgintel-agent
-```
-
-`pgpass` format:
-
-```text
-SOURCE_HOST:5432:erp:pgintel:SOURCE_PASSWORD
-REPOSITORY_HOST:5432:pgintel:pgintel_repo:REPOSITORY_PASSWORD
-```
-
-Permissions must be:
-
-```bash
-sudo chown pgintel:pgintel /etc/pgintel/pgpass
-sudo chmod 600 /etc/pgintel/pgpass
-sudo chown root:pgintel /etc/pgintel/pgintel.ini
-sudo chmod 640 /etc/pgintel/pgintel.ini
-```
-
-## 5. Assess version and capabilities
-
-After the monitoring role/authentication exists, run:
-
-```bash
-sudo -u pgintel env PGPASSFILE=/etc/pgintel/pgpass \
-  /opt/pg-intelligence/venv/bin/pgintel \
-  -c /etc/pgintel/pgintel.ini capabilities
-```
-
-The source major is auto-detected. The report compares the server with the PostgreSQL 18 monitoring baseline, shows lifecycle/EOL status and explains which observability features become available after an upgrade.
-
-If you want to guarantee that this agent is connected to a specific major, add for example:
-
-```ini
-[source]
-expected_major = 13
-```
-
-A mismatch causes validation/collection to fail. Omit the setting for automatic detection.
-
-See `docs/COMPATIBILITY.md` for the PG13–18 matrix.
-
-## 6. Validate before starting the daemon
-
-Run with exactly the same OS user and password file used by systemd:
+Run with the exact service identity:
 
 ```bash
 sudo -u pgintel env PGPASSFILE=/etc/pgintel/pgpass \
@@ -192,39 +161,39 @@ sudo -u pgintel env PGPASSFILE=/etc/pgintel/pgpass \
   -c /etc/pgintel/pgintel.ini check
 ```
 
-The important fields should be true:
-
-```text
-source: true
-repository: true
-pg_stat_statements: true
-pg_stat_statements_compatible: true
-```
-
-## 7. Perform two manual collections
-
-First sample establishes the baseline:
+Then inspect capabilities:
 
 ```bash
 sudo -u pgintel env PGPASSFILE=/etc/pgintel/pgpass \
-  /opt/pg-intelligence/venv/bin/pgintel -c /etc/pgintel/pgintel.ini collect
+  /opt/pg-intelligence/venv/bin/pgintel \
+  -c /etc/pgintel/pgintel.ini capabilities
 ```
 
-Wait at least one collection interval (default: 60 s), then:
+## 7. First collection
+
+FAST-only:
 
 ```bash
 sudo -u pgintel env PGPASSFILE=/etc/pgintel/pgpass \
-  /opt/pg-intelligence/venv/bin/pgintel -c /etc/pgintel/pgintel.ini collect
+  /opt/pg-intelligence/venv/bin/pgintel \
+  -c /etc/pgintel/pgintel.ini collect
 ```
 
-Generate a report:
+Optional one-off full inventory:
 
 ```bash
 sudo -u pgintel env PGPASSFILE=/etc/pgintel/pgpass \
-  /opt/pg-intelligence/venv/bin/pgintel -c /etc/pgintel/pgintel.ini report --hours 24
+  /opt/pg-intelligence/venv/bin/pgintel \
+  -c /etc/pgintel/pgintel.ini collect --full
 ```
 
 ## 8. Enable continuous collection
+
+```bash
+sudo ./install-rocky.sh --enable
+```
+
+or:
 
 ```bash
 sudo systemctl enable --now pgintel
@@ -232,83 +201,37 @@ sudo systemctl status pgintel
 sudo journalctl -u pgintel -f
 ```
 
-Or let the installer validate before enabling:
+`--enable` refuses to start a new service when `pgintel check` fails.
+
+## 9. Upgrade behavior
+
+Normal code upgrade preserves `/etc/pgintel/pgintel.ini` and `/etc/pgintel/pgpass`.
+
+For an existing installation:
 
 ```bash
+sudo ./install-rocky.sh --bootstrap-postgres
 sudo ./install-rocky.sh --enable
 ```
 
-`--enable` refuses to start the new service if `pgintel check` fails.
+Bootstrap initializes a missing PG Intelligence repository and applies repository migrations when necessary. It does not modify application tables, PostgreSQL preload configuration, or PostgreSQL service state.
 
-## 9. Semi-production safety checks
+## 10. Manual SQL scripts
 
-Before leaving it running:
+The SQL directory remains available for audit, troubleshooting or intentionally manual deployments:
 
-```sql
--- On monitored PostgreSQL
-\du+ pgintel
-SHOW shared_preload_libraries;
-SELECT current_database(), count(*) FROM pg_stat_statements GROUP BY 1;
+```text
+001_repository.sql
+    repository schema
+
+002_monitoring_role.sql
+    manual equivalent of source monitoring-role setup
+
+003_monitored_database.sql
+    manual pg_stat_statements extension setup after preload/restart
+
+004_production_safety.sql
+    historical 0.1.4 repository migration
 ```
 
-```bash
-# On agent host
-systemctl cat pgintel
-ls -ld /etc/pgintel /var/lib/pgintel /var/log/pgintel
-ls -l /etc/pgintel/pgintel.ini /etc/pgintel/pgpass
-journalctl -u pgintel --since '30 minutes ago' --no-pager
-```
-
-The monitored-side role should not have superuser, createdb, createrole,
-replication, bypassrls, or application-table write grants.
-
-## Upgrade from 0.1.1 / 0.1.2
-
-Copy/extract 0.1.3 (or `git pull` in a source checkout) and run:
-
-```bash
-sudo ./install-rocky.sh
-```
-
-Existing `/etc/pgintel/pgintel.ini` is preserved and corrected to
-`root:pgintel 0640`; `/etc/pgintel/pgpass` is created if absent. If the service
-was already active, the installer runs a validation and restarts it only when
-the validation succeeds.
-
-No repository schema migration is required when upgrading from 0.1.1/0.1.2 to 0.1.3.
-
-
-## Upgrade to 0.1.4 production-safety profile
-
-After installing/updating the code, existing 0.1.3 and earlier telemetry repositories need the new collector-health table:
-
-```bash
-sudo -u pgintel env PGPASSFILE=/etc/pgintel/pgpass \
-  /opt/pg-intelligence/venv/bin/pgintel -c /etc/pgintel/pgintel.ini migrate-repository
-```
-
-Then validate:
-
-```bash
-sudo -u pgintel env PGPASSFILE=/etc/pgintel/pgpass \
-  /opt/pg-intelligence/venv/bin/pgintel -c /etc/pgintel/pgintel.ini check
-```
-
-The 0.1.4 defaults are intentionally conservative for a busy production source. Existing INI files do not need a new section because these values are built-in defaults; adding them explicitly is recommended for clarity:
-
-```ini
-[collection]
-slow_interval_seconds = 900
-size_interval_seconds = 3600
-max_source_cycle_seconds = 20
-query_text_mode = none
-```
-
-A normal manual collection is now FAST-only:
-
-```bash
-sudo -u pgintel env PGPASSFILE=/etc/pgintel/pgpass \
-  /opt/pg-intelligence/venv/bin/pgintel -c /etc/pgintel/pgintel.ini collect
-```
-
-Use `collect --full` only when you deliberately want table/index inventory plus physical size calculations.
+For 0.1.5 guided installs, these no longer need to be applied manually except the deliberate `pg_stat_statements` extension step.
