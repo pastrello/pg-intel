@@ -2,10 +2,12 @@
 set -Eeuo pipefail
 
 # PG Intelligence installer for Rocky Linux / RHEL-like systems.
+# Supported installer targets: RHEL-compatible 8, 9 and 10.
 # Safe defaults:
-#   - does not change the monitored PostgreSQL automatically
+#   - only creates PG Intelligence roles/grants/repository objects during accepted bootstrap
+#   - never changes shared_preload_libraries or restarts PostgreSQL
 #   - does not start a new service unless --enable is supplied
-#   - keeps DB passwords out of pgintel.ini via PGPASSFILE
+#   - keeps service/admin passwords out of pgintel.ini and command-line arguments
 
 VERSION="0.1.5"
 PREFIX="${PREFIX:-/opt/pg-intelligence}"
@@ -55,8 +57,8 @@ Options:
   --assess          Detect PostgreSQL version/capabilities and print missing
                     monitoring versus the PostgreSQL 18 baseline.
   --migrate-repository
-                    Apply the idempotent PG Intelligence repository migration
-                    required by 0.1.4. Never alters the monitored source DB.
+                    Apply idempotent PG Intelligence repository migrations only.
+                    Never alters the monitored source DB.
   --force-config    Replace an existing pgintel.ini with the example/default.
                     A timestamped backup is created first.
   --no-dnf          Do not install missing OS packages with dnf.
@@ -513,12 +515,16 @@ Paths:
   SQL scripts : $PREFIX/sql
   HOW-TO      : $PREFIX/docs/SEMI_PRODUCTION_HOWTO.md
 
-Next steps if this is a new installation:
-  1. Apply the PostgreSQL SQL steps in the HOW-TO.
-  2. Review $CONFIG_DIR/pgintel.ini and $CONFIG_DIR/pgpass.
-  3. On upgrades from 0.1.3 or older, migrate the telemetry repository:
-       sudo -u $SERVICE_USER env PGPASSFILE=$CONFIG_DIR/pgpass \
-         $PREFIX/venv/bin/pgintel -c $CONFIG_DIR/pgintel.ini migrate-repository
+New installations can use --configure to bootstrap the monitoring role,
+repository role/database/schema and repository migrations.
+
+Manual PostgreSQL step intentionally retained:
+  1. Add pg_stat_statements to shared_preload_libraries if needed.
+  2. Restart PostgreSQL in an approved maintenance window if preload changed.
+  3. In the monitored database:
+       CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
+Then:
   4. Assess PostgreSQL version/capabilities:
        sudo -u $SERVICE_USER env PGPASSFILE=$CONFIG_DIR/pgpass \
          $PREFIX/venv/bin/pgintel -c $CONFIG_DIR/pgintel.ini capabilities
@@ -534,5 +540,5 @@ Next steps if this is a new installation:
   8. Enable when ready:
        systemctl enable --now $SERVICE_NAME
 
-The installer intentionally does not ALTER the monitored PostgreSQL cluster.
+The bootstrap never changes application tables, shared_preload_libraries, or PostgreSQL service state.
 EOF_DONE
