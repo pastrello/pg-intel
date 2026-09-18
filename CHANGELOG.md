@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.5 - 2026-09-18
+
+- Add an idempotent PostgreSQL bootstrap to the installer.
+- `--configure` now offers to create missing PG Intelligence roles, grants, repository database/schema and apply repository migrations.
+- Add explicit `--bootstrap-postgres` for rerunning the database bootstrap without rewriting agent configuration.
+- Keep `shared_preload_libraries`, PostgreSQL restart and `CREATE EXTENSION pg_stat_statements` as deliberate manual steps.
+- Refuse bootstrap when source and repository point to the same configured database, preventing telemetry tables from being initialized inside the application database.
+- Refuse to take over an existing repository database owned by another role or an existing PG Intelligence role with elevated attributes.
+- Do not reset passwords or role attributes of safe pre-existing roles; only required PG Intelligence grants are added.
+- Add RHEL-family 8/9/10 installer targeting; CentOS 7 is legacy/best-effort and Ubuntu/Debian remain out of scope.
+- On RHEL-family 8, select a Python 3.9+ runtime, validate `pyexpat`/OpenSSL, repair distro `expat`/Python 3.12 package mismatches, validate pip, and recover incomplete virtualenvs.
+- Add bootstrap safety unit tests.
+
 ## 0.1.4 - 2026-09-18
 
 - Add a production-safety collection scheduler: FAST 60s, SLOW 15min and SIZE 60min by default.
