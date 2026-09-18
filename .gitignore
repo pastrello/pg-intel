@@ -1,0 +1,14 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+pgintel.ini
+.env
+
+# Local secrets
+pgpass
+*.pgpass
