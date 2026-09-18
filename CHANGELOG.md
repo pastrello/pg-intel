@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.3 - 2026-09-18
+
+- Add validated source compatibility for PostgreSQL 13 through 18.
+- Auto-detect the source major using `server_version_num`; optional `expected_major` provides a safety pin.
+- Make `pg_stat_database` capability-aware so PostgreSQL 13 no longer fails on PG14+ session columns.
+- Add `pgintel capabilities` / `--json` with a PostgreSQL 18 capability baseline.
+- Report PostgreSQL community lifecycle/EOL status and upgrade benefits through PG18.
+- Detect monitoring/configuration gaps including `pg_stat_wal`, `pg_stat_io`, last-scan timestamps, richer PG17 statement I/O, and PG18 parallel-worker/WAL-buffer metrics.
+- Add installer `--assess` mode and best-effort capability assessment during interactive installation.
+- Make the installer work from both release bundles and a source-only Git checkout without `dist/`.
+- Expand unit tests from 12 to 21.
+
 ## 0.1.2 - 2026-09-17
 
 - Rewrite the Rocky Linux installer for idempotent install/upgrade.

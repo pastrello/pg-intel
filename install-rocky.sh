@@ -7,7 +7,7 @@ set -Eeuo pipefail
 #   - does not start a new service unless --enable is supplied
 #   - keeps DB passwords out of pgintel.ini via PGPASSFILE
 
-VERSION="0.1.2"
+VERSION="0.1.3"
 PREFIX="${PREFIX:-/opt/pg-intelligence}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/pgintel}"
 STATE_DIR="${STATE_DIR:-/var/lib/pgintel}"
@@ -22,6 +22,7 @@ INTERACTIVE_CONFIG=0
 ENABLE_SERVICE=0
 FORCE_CONFIG=0
 RUN_TESTS=1
+ASSESS_CAPABILITIES=0
 
 log() { printf '[pgintel-installer] %s\n' "$*"; }
 warn() { printf '[pgintel-installer] WARNING: %s\n' "$*" >&2; }
@@ -39,6 +40,8 @@ Options:
                     pgintel.ini + /etc/pgintel/pgpass interactively.
   --enable          Run 'pgintel check' and, only if successful, enable/start
                     the systemd service.
+  --assess          Detect PostgreSQL version/capabilities and print missing
+                    monitoring versus the PostgreSQL 18 baseline.
   --force-config    Replace an existing pgintel.ini with the example/default.
                     A timestamped backup is created first.
   --no-dnf          Do not install missing OS packages with dnf.
@@ -60,6 +63,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --configure) INTERACTIVE_CONFIG=1 ;;
     --enable) ENABLE_SERVICE=1 ;;
+    --assess) ASSESS_CAPABILITIES=1 ;;
     --force-config) FORCE_CONFIG=1 ;;
     --no-dnf) INSTALL_DEPS=0 ;;
     --skip-tests) RUN_TESTS=0 ;;
@@ -95,7 +99,7 @@ install_dependencies() {
     (( INSTALL_DEPS == 1 )) || die "python3-pip is missing (--no-dnf selected)."
     command -v dnf >/dev/null 2>&1 || die "dnf not found; install python3-pip manually."
     log "Installing python3-pip"
-    dnf -y install  python3-pip
+    dnf -y install python3-pip
   fi
 
   "$PYTHON_BIN" - <<'PY' || die "Python 3.9 or newer is required."
@@ -106,10 +110,11 @@ PY
 
 ensure_service_account() {
   if ! getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
-    groupadd --system "$SERVICE_GROUP"  fi
+    groupadd --system "$SERVICE_GROUP"
+  fi
   if ! id "$SERVICE_USER" >/dev/null 2>&1; then
     useradd --system \
-      --gid "$SERVICE_GROUP" \
+      --gid "$SERVICE_GROUP" \
       --home-dir "$STATE_DIR" \
       --create-home \
       --shell /sbin/nologin \
@@ -121,7 +126,7 @@ ensure_service_account() {
 backup_if_needed() {
   local file="$1"
   if [[ -e "$file" ]]; then
-    cp -a "$file" "${file}.bak.$(date +%Y%m%d%H M%S)"
+    cp -a "$file" "${file}.bak.$(date +%Y%m%d%H%M%S)"
   fi
 }
 
@@ -139,7 +144,6 @@ install_files() {
   fi
   install -m 0644 pyproject.toml README.md CHANGELOG.md config.example.ini "$PREFIX/"
 
-  # Keep the example always current.
   install -m 0640 -o root -g "$SERVICE_GROUP" config.example.ini "$CONFIG_DIR/pgintel.ini.example"
 
   if [[ ! -f "$CONFIG_DIR/pgintel.ini" ]]; then
@@ -246,15 +250,19 @@ prompt_default() {
 }
 
 configure_interactively() {
-  local instance source_host source_port source_db source_user source_password
+  local instance source_host source_port source_db source_user source_password source_expected_major
   local repo_host repo_port repo_db repo_user repo_password
 
   log "Interactive configuration. Passwords are stored only in $CONFIG_DIR/pgpass."
-  instance="$(prompt_default 'Instance name' "$(hostname -s))"
+  instance="$(prompt_default 'Instance name' "$(hostname -s)")"
   source_host="$(prompt_default 'Monitored PostgreSQL host' '127.0.0.1')"
   source_port="$(prompt_default 'Monitored PostgreSQL port' '5432')"
   source_db="$(prompt_default 'Monitored database' 'postgres')"
   source_user="$(prompt_default 'Monitoring role' 'pgintel')"
+  source_expected_major="$(prompt_default 'Expected PostgreSQL major (auto or 13-18)' 'auto')"
+  if [[ "$source_expected_major" != "auto" && ! "$source_expected_major" =~ ^(13|14|15|16|17|18)$ ]]; then
+    die "Expected major must be auto or an integer from 13 through 18."
+  fi
   read -r -s -p "Password for ${source_user} on monitored PostgreSQL (ENTER to leave unchanged/not add): " source_password; echo
 
   repo_host="$(prompt_default 'Repository PostgreSQL host' '127.0.0.1')"
@@ -265,35 +273,140 @@ configure_interactively() {
 
   backup_if_needed "$CONFIG_DIR/pgintel.ini"
   cat > "$CONFIG_DIR/pgintel.ini" <<EOF_CFG
-˜YÙ[Bš[œÝ[˜ÙWÛ˜[YHH	[œÝ[˜ÙBš[\˜[ÜÙXÛÛ™ÈHŒœÝÜ™WÜ]Y\žWÝ^H˜[ÙB‚–ÜÛÝ\˜ÙWB™ÛˆHÜÝIÛÝ\˜ÙWÚÜÝÜIÛÝ\˜ÙWÜÜ›˜[YOIÛÝ\˜ÙWÙˆ\Ù\IÛÝ\˜ÙWÝ\Ù\ˆÛÛ›™XÝÝ[Y[Ý]MH\XØ][Û—Û˜[YO\Ú[[XYÙ[‚–Ü™\ÜÚ]ÜžWB™ÛˆHÜÝI™\×ÚÜÝÜI™\×ÜÜ›˜[YOI™\×Ùˆ\Ù\I™\×Ý\Ù\ˆÛÛ›™XÝÝ[Y[Ý]MH\XØ][Û—Û˜[YO\Ú[[XYÙ[‚–Ø[˜[\Ú\×Bœ]Y\žWÜ™YÜ™\ÜÚ[Û—Ü˜][ÈHËŒœ]Y\žWÜ™YÜ™\ÜÚ[Û—ÛZ[—Û\ÈHLŒœ]Y\žWÜ™YÜ™\ÜÚ[Û—ÛZ[—ØØ[ÈHB™XYÝ\WÜ˜][ÈHŒŒ[\Øž]\×Ø[\HLÌÍÍN›\™ÙWÝ[\ÙYÚ[™^Øž]\ÈHLÌÍÍN‘SÑ—ÐÑ‘ÂˆÚÝÛˆ›ÛÝˆ‰ÑT•’PÑWÑÔ“ÕTˆ‰ÓÓ‘’Q×ÑT‹ÜÚ[[š[šH‚ˆÚ[Ù‰ÓÓ‘’Q×ÑT‹ÜÚ[[š[šH‚‚ˆÈ™\Ù\™HÛÛ[Y[ËÛÝ\ˆ[šY\È[™™\XÙHÛ›H^XÝÛÛ›™XÝ[ÛˆÙ^\Ë‚ˆØØ[\ˆ\H‰
-ZÝ[\
-H‚ˆ]ÚÈQŽˆ]ˆH‰ÛÝ\˜ÙWÚÜÝˆ]ˆH‰ÛÝ\˜ÙWÜÜˆ]ˆH‰ÛÝ\˜ÙWÙˆˆ]ˆOH‰ÛÝ\˜ÙWÝ\Ù\ˆˆˆ]ˆšH‰™\×ÚÜÝˆ]ˆœH‰™\×ÜÜˆ]ˆ™H‰™\×Ùˆˆ]ˆOH‰™\×Ý\Ù\ˆˆˆ	Ð‘QÒSžÓÑ”ÏHŽˆŸBˆ×ˆËÈ‘ˆHÜš[È™^Bˆ
-	OOZ	‰ˆ	O\	‰ˆ	ÏOY	‰ˆ	O]JHÛ™^Bˆ
-	OO\š	‰ˆ	O\œ	‰ˆ	ÏO\™	‰ˆ	O\JHÛ™^BˆÜš[IÈ‰ÓÓ‘’Q×ÑT‹ÜÜ\ÜÈˆˆ‰\‚‚ˆØ]‰\ˆˆ‰ÓÓ‘’Q×ÑT‹ÜÜ\ÜÈ‚ˆ›HYˆ‰\‚ˆYˆÖÈ[ˆ‰ÛÝ\˜ÙWÜ\ÜÝÛÜ™ˆWNÈ[‚ˆš[ˆ	É\Î‰\Î‰\Î‰\Î‰\×‰Èˆ‰
-Ü\Ü×Ù\ØØ\H‰ÛÝ\˜ÙWÚÜÝŠHˆ‰
-Ü\Ü×Ù\ØØ\H‰ÛÝ\˜ÙWÜÜŠHˆˆ‰
-Ü\Ü×Ù\ØØ\H‰ÛÝ\˜ÙWÙˆŠHˆ‰
-Ü\Ü×Ù\ØØ\H‰ÛÝ\˜ÙWÝ\Ù\ˆŠHˆˆ‰
-Ü\Ü×Ù\ØØ\H‰ÛÝ\˜ÙWÜ\ÜÝÛÜ™ŠHˆˆ‰ÓÓ‘’Q×ÑT‹ÜÜ\ÜÈ‚ˆšBˆYˆÖÈ[ˆ‰™\×Ü\ÜÝÛÜ™ˆWNÈ[‚ˆš[ˆ	É\Î‰\Î‰\Î‰\Î‰\×‰Èˆ‰
-Ü\Ü×Ù\ØØ\H‰™\×ÚÜÝŠHˆ‰
-Ü\Ü×Ù\ØØ\H‰™\×ÜÜŠHˆˆ‰
-Ü\Ü×Ù\ØØ\H‰™\×ÙˆŠHˆ‰
-Ü\Ü×Ù\ØØ\H‰™\×Ý\Ù\ˆŠHˆˆ‰
-Ü\Ü×Ù\ØØ\H‰™\×Ü\ÜÝÛÜ™ŠHˆˆ‰ÓÓ‘’Q×ÑT‹ÜÜ\ÜÈ‚ˆšBˆÚÝÛˆ‰ÑT•’PÑWÕTÑTˆŽˆ‰ÑT•’PÑWÑÔ“ÕTˆ‰ÓÓ‘’Q×ÑT‹ÜÜ\ÜÈ‚ˆÚ[ÙŒ‰ÓÓ‘’Q×ÑT‹ÜÜ\ÜÈ‚ˆÙÈÛÛ™šYÝ\˜][ÛˆÜš][‹ˆ^\Ý[™ÈÚ[[š[šHØ\È˜XÚÙY\Ú[ˆ™\Ù[ˆ‚ŸB‚œ[—Ý\ÝÊ
-HÂˆ
+[agent]
+instance_name = $instance
+interval_seconds = 60
+store_query_text = false
 
-•S—ÕTÕÈOHH
-JH™]\›ˆˆÙÈ”[›š[™È[™Y[š]\ÝÈ‚ˆ‰‘Q’VÝ™[‹Øš[‹Ü]Ûˆˆ[H[š]\Ý\ØÛÝ™\ˆ\È‰‘Q’VÝ\ÝÈˆ\BŸB‚˜[Y]WØ[™Ù[˜X›J
-HÂˆÙÈ”[›š[™ÈÛÛ›™XÝ]š]KØØ\Xš[]HÚXÚÈ\ÈÙ\šXÙH\Ù\ˆ‚ˆYˆH[\Ù\ˆ]H‰ÑT•’PÑWÕTÑTˆˆKH[ˆÔTÔÑ’SOH‰ÓÓ‘’Q×ÑT‹ÜÜ\ÜÈˆˆ‰‘Q’VÝ™[‹Øš[‹ÜÚ[[ˆXÈ‰ÓÓ‘’Q×ÑT‹ÜÚ[[š[šHˆÚXÚÎÈ[‚ˆYHœÚ[[ÚXÚÈ˜Z[YˆÙ\šXÙHØ\È“Õ[˜X›YÜÝ\Yˆ‚ˆšBˆÞ\Ý[XÝ[˜X›HK[›ÝÈ‰ÑT•’PÑWÓSQH‚ˆÛY\BˆÞ\Ý[XÝK[›Ë\YÙ\ˆKY[Ý]\È‰ÑT•’PÑWÓSQHˆYBŸB‚•ÐT×ÐPÕU‘OLœÞ\Ý[XÝ\ËXXÝ]™HK\]ZY]‰ÑT•’PÑWÓSQHˆ‹Ù]‹Û[	‰ˆÐT×ÐPÕU‘OLHYB‚š[œÝ[Ù\[™[˜ÚY\Â™[œÝ\™WÜÙ\šXÙWØXØÛÝ[š[œÝ[Ùš[\Âš[œÝ[Ü]Û‚‚Üš]WÜÞ\Ý[YÝ[š]Š
-S•TPÕU‘WÐÓÓ‘’QÈOHH
-JH	‰ˆÛÛ™šYÝ\™WÚ[\˜XÝ]™[Bœ[—Ý\ÝÂ‚šYˆ
+[source]
+dsn = host=$source_host port=$source_port dbname=$source_db user=$source_user connect_timeout=5 application_name=pgintel-agent
+$( [[ "$source_expected_major" != "auto" ]] && printf 'expected_major = %s\n' "$source_expected_major" )
+[repository]
+dsn = host=$repo_host port=$repo_port dbname=$repo_db user=$repo_user connect_timeout=5 application_name=pgintel-agent
 
-SP“WÔÑT•’PÑHOHH
-JNÈ[‚ˆ˜[Y]WØ[™Ù[˜X›B™[Yˆ
+[analysis]
+query_regression_ratio = 3.0
+query_regression_min_ms = 50.0
+query_regression_min_calls = 5
+dead_tuple_ratio = 0.20
+temp_bytes_alert = 1073741824
+large_unused_index_bytes = 1073741824
+EOF_CFG
+  chown root:"$SERVICE_GROUP" "$CONFIG_DIR/pgintel.ini"
+  chmod 0640 "$CONFIG_DIR/pgintel.ini"
 
-ÐT×ÐPÕU‘HOHH
-JNÈ[‚ˆÙÈ”Ù\šXÙHØ\È[™XYHXÝ]™NÈ˜[Y][™ÈÛÛ™šYÝ\˜][Ûˆ™Y›Ü™H™\Ý\ˆ‚ˆYˆ[\Ù\ˆ]H‰ÑT•’PÑWÕTÑTˆˆKH[ˆÔTÔÑ’SOH‰ÓÓ‘’Q×ÑT‹ÜÜ\ÜÈˆˆ‰‘Q’VÝ™[‹Øš[‹ÜÚ[[ˆXÈ‰ÓÓ‘’Q×ÑT‹ÜÚ[[š[šHˆÚXÚÈ‹Ù]‹Û[È[‚ˆÞ\Ý[XÝ™\Ý\‰ÑT•’PÑWÓSQH‚ˆÙÈXÝ]™HÙ\šXÙH\Ü˜YY[™™\Ý\YÝXØÙ\ÜÙ[Kˆ‚ˆ[ÙBˆØ\›ˆ•˜[Y][Ûˆ˜Z[YY\ˆ\Ü˜YKˆ^\Ý[™ÈÙ\šXÙHØ\È“Õ™\Ý\YÈ[œÜXÝÛÛ™šYÝ\˜][Û‹ˆ‚ˆšB™šB‚˜Ø]SÑ—ÑÓ‘B‚”È[[YÙ[˜ÙH	Õ‘T”ÒSÓŸH[œÝ[][ÛˆÛÛ\]Y‚‚”]Î‚ˆ\XØ][Ûˆˆ	‘Q’VˆÛÛ™šYÈˆ	ÓÓ‘’Q×ÑT‹ÜÚ[[š[šH
-›ÛÝ‰ÑT•’PÑWÑÔ“ÕT
-Bˆ\ÜÝÛÜ™Èˆ	ÓÓ‘’Q×ÑT‹ÜÜ\ÜÈ
-	ÑT•’PÑWÕTÑTŽ‰ÑT•’PÑWÑÔ“ÕTŒ
-BˆÝ]Hˆ	ÕUWÑT‚ˆÙÜÈˆ›Ý\›˜[Ý]H	ÑT•’PÑWÓSQBˆÔSØÜš\Èˆ	‘Q’VÜÜ[ˆÕËUÈˆ	‘Q’VÙØÜËÔÑSRWÔ“ÑPÕSÓ—ÒÕÕË›Y‚“™^Ý\ÈYˆ\È\ÈH™]È[œÝ[][ÛŽ‚ˆKˆ\HHÜÝÜ™TÔSÔSÝ\È[ˆHÕËUË‚ˆ‹ˆ™]šY]È	ÓÓ‘’Q×ÑT‹ÜÚ[[š[šH[™	ÓÓ‘’Q×ÑT‹ÜÜ\ÜË‚ˆËˆ˜[Y]N‚ˆÝYÈ]H	ÑT•’PÑWÕTÑTˆ[ˆÔTÔÑ’SOIÓÓ‘’Q×ÑT‹ÜÜ\ÜÈˆ	‘Q’VÝ™[‹Øš[‹ÜÚ[[XÈ	ÓÓ‘’Q×ÑT‹ÜÚ[[š[šHÚXÚÂˆˆš\œÝX[X[ÛÛXÝ[ÛŽ‚ˆÝYÈ]H	ÑT•’PÑWÕTÑTˆ[ˆÔTÔÑ’SOIÓÓ‘’Q×ÑT‹ÜÜ\ÜÈˆ	‘Q’VÝ™[‹Øš[‹ÜÚ[[XÈ	ÓÓ‘’Q×ÑT‹ÜÚ[[š[šHÛÛXÝˆKˆ[˜X›HÚ[ˆ™XYN‚ˆÞ\Ý[XÝ[˜X›HK[›ÝÈ	ÑT•’PÑWÓSQB‚•H[œÝ[\ˆ[[[Û˜[HÙ\È›ÝSTˆH[Ûš]Ü™YÜÝÜ™TÔSÛ\Ý\‹‚‘SÑ—ÑÓ‘B
+  local tmp
+  tmp="$(mktemp)"
+  awk -F: -v h="$source_host" -v p="$source_port" -v d="$source_db" -v u="$source_user" \
+    -v rh="$repo_host" -v rp="$repo_port" -v rd="$repo_db" -v ru="$repo_user" \
+    'BEGIN{OFS=":"}
+     /^#/ || NF < 5 {print; next}
+     ($1==h && $2==p && $3==d && $4==u) {next}
+     ($1==rh && $2==rp && $3==rd && $4==ru) {next}
+     {print}' "$CONFIG_DIR/pgpass" > "$tmp"
+
+  cat "$tmp" > "$CONFIG_DIR/pgpass"
+  rm -f "$tmp"
+  if [[ -n "$source_password" ]]; then
+    printf '%s:%s:%s:%s:%s\n' \
+      "$(pgpass_escape "$source_host")" "$(pgpass_escape "$source_port")" \
+      "$(pgpass_escape "$source_db")" "$(pgpass_escape "$source_user")" \
+      "$(pgpass_escape "$source_password")" >> "$CONFIG_DIR/pgpass"
+  fi
+  if [[ -n "$repo_password" ]]; then
+    printf '%s:%s:%s:%s:%s\n' \
+      "$(pgpass_escape "$repo_host")" "$(pgpass_escape "$repo_port")" \
+      "$(pgpass_escape "$repo_db")" "$(pgpass_escape "$repo_user")" \
+      "$(pgpass_escape "$repo_password")" >> "$CONFIG_DIR/pgpass"
+  fi
+  chown "$SERVICE_USER":"$SERVICE_GROUP" "$CONFIG_DIR/pgpass"
+  chmod 0600 "$CONFIG_DIR/pgpass"
+  log "Configuration written. Existing pgintel.ini was backed up when present."
+}
+
+run_tests() {
+  (( RUN_TESTS == 1 )) || return 0
+  log "Running bundled unit tests"
+  "$PREFIX/venv/bin/python" -m unittest discover -s "$PREFIX/tests" -q
+}
+
+assess_capabilities() {
+  log "Assessing PostgreSQL version and monitoring capabilities"
+  if runuser -u "$SERVICE_USER" -- env PGPASSFILE="$CONFIG_DIR/pgpass" \
+      "$PREFIX/venv/bin/pgintel" -c "$CONFIG_DIR/pgintel.ini" capabilities; then
+    return 0
+  fi
+  warn "Capability assessment could not connect yet. Apply the SQL/authentication steps, then run: sudo ./install-rocky.sh --assess"
+  return 1
+}
+
+validate_and_enable() {
+  log "Running connectivity/capability check as service user"
+  if ! runuser -u "$SERVICE_USER" -- env PGPASSFILE="$CONFIG_DIR/pgpass" \
+      "$PREFIX/venv/bin/pgintel" -c "$CONFIG_DIR/pgintel.ini" check; then
+    die "pgintel check failed. Service was NOT enabled/started."
+  fi
+  assess_capabilities || true
+  systemctl enable --now "$SERVICE_NAME"
+  sleep 1
+  systemctl --no-pager --full status "$SERVICE_NAME" || true
+}
+
+WAS_ACTIVE=0
+systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null && WAS_ACTIVE=1 || true
+
+install_dependencies
+ensure_service_account
+install_files
+install_python
+write_systemd_unit
+(( INTERACTIVE_CONFIG == 1 )) && configure_interactively
+run_tests
+
+if (( ASSESS_CAPABILITIES == 1 || INTERACTIVE_CONFIG == 1 )); then
+  assess_capabilities || true
+fi
+
+if (( ENABLE_SERVICE == 1 )); then
+  validate_and_enable
+elif (( WAS_ACTIVE == 1 )); then
+  log "Service was already active; validating configuration before restart."
+  if runuser -u "$SERVICE_USER" -- env PGPASSFILE="$CONFIG_DIR/pgpass" \
+      "$PREFIX/venv/bin/pgintel" -c "$CONFIG_DIR/pgintel.ini" check >/dev/null; then
+    systemctl restart "$SERVICE_NAME"
+    log "Active service upgraded and restarted successfully."
+  else
+    warn "Validation failed after upgrade. Existing service was NOT restarted; inspect configuration."
+  fi
+fi
+
+cat <<EOF_DONE
+
+PG Intelligence ${VERSION} installation completed.
+
+Paths:
+  Application : $PREFIX
+  Config      : $CONFIG_DIR/pgintel.ini       (root:$SERVICE_GROUP 0640)
+  Passwords   : $CONFIG_DIR/pgpass            ($SERVICE_USER:$SERVICE_GROUP 0600)
+  State       : $STATE_DIR
+  Logs        : journalctl -u $SERVICE_NAME
+  SQL scripts : $PREFIX/sql
+  HOW-TO      : $PREFIX/docs/SEMI_PRODUCTION_HOWTO.md
+
+Next steps if this is a new installation:
+  1. Apply the PostgreSQL SQL steps in the HOW-TO.
+  2. Review $CONFIG_DIR/pgintel.ini and $CONFIG_DIR/pgpass.
+  3. Assess PostgreSQL version/capabilities:
+       sudo -u $SERVICE_USER env PGPASSFILE=$CONFIG_DIR/pgpass \
+         $PREFIX/venv/bin/pgintel -c $CONFIG_DIR/pgintel.ini capabilities
+  4. Validate:
+       sudo -u $SERVICE_USER env PGPASSFILE=$CONFIG_DIR/pgpass \
+         $PREFIX/venv/bin/pgintel -c $CONFIG_DIR/pgintel.ini check
+  5. First manual collection:
+       sudo -u $SERVICE_USER env PGPASSFILE=$CONFIG_DIR/pgpass \
+         $PREFIX/venv/bin/pgintel -c $CONFIG_DIR/pgintel.ini collect
+  6. Enable when ready:
+       systemctl enable --now $SERVICE_NAME
+
+The installer intentionally does not ALTER the monitored PostgreSQL cluster.
+EOF_DONE

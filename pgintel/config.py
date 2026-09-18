@@ -8,6 +8,7 @@ from pathlib import Path
 @dataclass(frozen=True)
 class DbConfig:
     dsn: str
+    expected_major: int | None = None
 
 
 @dataclass(frozen=True)
@@ -44,7 +45,10 @@ def load_config(path: str | Path) -> AgentConfig:
         instance_name=_require(cp, "agent", "instance_name"),
         interval_seconds=cp.getint("agent", "interval_seconds", fallback=60),
         store_query_text=cp.getboolean("agent", "store_query_text", fallback=False),
-        source=DbConfig(_require(cp, "source", "dsn")),
+        source=DbConfig(
+            _require(cp, "source", "dsn"),
+            cp.getint("source", "expected_major") if cp.has_option("source", "expected_major") else None,
+        ),
         repository=DbConfig(_require(cp, "repository", "dsn")),
         query_regression_ratio=cp.getfloat("analysis", "query_regression_ratio", fallback=3.0),
         query_regression_min_ms=cp.getfloat("analysis", "query_regression_min_ms", fallback=50.0),

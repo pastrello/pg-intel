@@ -1,4 +1,4 @@
-# PG Intelligence 0.1.2 — Semi-production HOW-TO
+# PG Intelligence 0.1.3 — Semi-production HOW-TO
 
 This procedure keeps the monitored PostgreSQL side read-only and separates it
 from the telemetry repository.
@@ -159,7 +159,30 @@ sudo chown root:pgintel /etc/pgintel/pgintel.ini
 sudo chmod 640 /etc/pgintel/pgintel.ini
 ```
 
-## 5. Validate before starting the daemon
+## 5. Assess version and capabilities
+
+After the monitoring role/authentication exists, run:
+
+```bash
+sudo -u pgintel env PGPASSFILE=/etc/pgintel/pgpass \
+  /opt/pg-intelligence/venv/bin/pgintel \
+  -c /etc/pgintel/pgintel.ini capabilities
+```
+
+The source major is auto-detected. The report compares the server with the PostgreSQL 18 monitoring baseline, shows lifecycle/EOL status and explains which observability features become available after an upgrade.
+
+If you want to guarantee that this agent is connected to a specific major, add for example:
+
+```ini
+[source]
+expected_major = 13
+```
+
+A mismatch causes validation/collection to fail. Omit the setting for automatic detection.
+
+See `docs/COMPATIBILITY.md` for the PG13–18 matrix.
+
+## 6. Validate before starting the daemon
 
 Run with exactly the same OS user and password file used by systemd:
 
@@ -178,7 +201,7 @@ pg_stat_statements: true
 pg_stat_statements_compatible: true
 ```
 
-## 6. Perform two manual collections
+## 7. Perform two manual collections
 
 First sample establishes the baseline:
 
@@ -201,7 +224,7 @@ sudo -u pgintel env PGPASSFILE=/etc/pgintel/pgpass \
   /opt/pg-intelligence/venv/bin/pgintel -c /etc/pgintel/pgintel.ini report --hours 24
 ```
 
-## 7. Enable continuous collection
+## 8. Enable continuous collection
 
 ```bash
 sudo systemctl enable --now pgintel
@@ -217,7 +240,7 @@ sudo ./install-rocky.sh --enable
 
 `--enable` refuses to start the new service if `pgintel check` fails.
 
-## 8. Semi-production safety checks
+## 9. Semi-production safety checks
 
 Before leaving it running:
 
@@ -239,9 +262,9 @@ journalctl -u pgintel --since '30 minutes ago' --no-pager
 The monitored-side role should not have superuser, createdb, createrole,
 replication, bypassrls, or application-table write grants.
 
-## Upgrade from 0.1.1
+## Upgrade from 0.1.1 / 0.1.2
 
-Copy/extract 0.1.2 and run:
+Copy/extract 0.1.3 (or `git pull` in a source checkout) and run:
 
 ```bash
 sudo ./install-rocky.sh
@@ -252,4 +275,4 @@ Existing `/etc/pgintel/pgintel.ini` is preserved and corrected to
 was already active, the installer runs a validation and restarts it only when
 the validation succeeds.
 
-No repository schema migration is required from 0.1.1 to 0.1.2.
+No repository schema migration is required when upgrading from 0.1.1/0.1.2 to 0.1.3.

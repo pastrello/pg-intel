@@ -1,4 +1,4 @@
-# PG Intelligence 0.1.2 — Prototype
+# PG Intelligence 0.1.3 — Prototype
 
 A deliberately small PostgreSQL telemetry collector and deterministic analyzer. It is the data foundation for future query advisors, plan regression analysis, anomaly detection and AI/ML experiments.
 
@@ -29,13 +29,33 @@ PG Intelligence repository
 ## Requirements
 
 - Python 3.9+
-- PostgreSQL repository (tested design target: PostgreSQL 18)
+- Monitored PostgreSQL: **13 through 18** (automatic capability detection)
+- PostgreSQL repository (design target: PostgreSQL 18; older repository versions are not the source-compatibility target)
 - `psycopg` 3
 - `pg_stat_statements` is optional but strongly recommended
 
+## PostgreSQL 13–18 compatibility
+
+PG Intelligence detects `server_version_num` automatically and adapts its SQL to the server capabilities. The current validated source range is PostgreSQL **13, 14, 15, 16, 17 and 18**.
+
+```bash
+pgintel -c /etc/pgintel/pgintel.ini capabilities
+```
+
+This command reports missing monitoring versus a PostgreSQL 18 baseline, lifecycle/EOL status, configuration gaps and the observability/engine benefits available by upgrading. See [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
+
+You can optionally pin the expected major as a safety check:
+
+```ini
+[source]
+expected_major = 13
+```
+
+If omitted, detection is automatic.
+
 ## 1. Prepare the monitored PostgreSQL
 
-Review `sql/002_monitoring_role.sql`. The role password/authentication is configured separately according to your PostgreSQL policy.
+Review `sql/002_monitoring_role.sql`. Authentication/password is configured separately according to your PostgreSQL policy; the SQL intentionally contains no password.
 
 `pg_stat_statements` must be configured by PostgreSQL itself. Typical setup requires it in `shared_preload_libraries`, a PostgreSQL restart, then:
 
@@ -62,20 +82,13 @@ psql -d pgintel -f sql/001_repository.sql
 
 ## 3. Install on Rocky Linux 9/10
 
-The recommended path is the idempotent installer:
+Recommended guided installation:
 
 ```bash
 sudo ./install-rocky.sh --configure
 ```
 
-It creates the service account, virtual environment, directories, systemd unit,
-configuration skeleton and `/etc/pgintel/pgpass` with restrictive permissions.
-Passwords are kept out of `pgintel.ini`. The installer does **not** change or
-restart the monitored PostgreSQL.
-
-For the complete semi-production sequence, including the SQL files that must be
-applied to the monitored cluster/database and repository, see
-`docs/SEMI_PRODUCTION_HOWTO.md`.
+The installer creates the service account, virtualenv, protected configuration/`PGPASSFILE`, directories and systemd unit. It does **not** modify or restart the monitored PostgreSQL. After applying the SQL preparation steps, use `sudo ./install-rocky.sh --enable` to validate and start the service. See `docs/SEMI_PRODUCTION_HOWTO.md` for the complete procedure.
 
 ## 4. Validate
 
