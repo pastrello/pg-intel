@@ -251,16 +251,21 @@ install_python() {
     create_venv || die "Could not create a functional venv with pip. Verify distro Python/venv/pip packages."
   fi
   local local_wheel=""
-  if compgen -G "$PREFIX/dist/pg_intelligence-*.whl" >/dev/null; then
-    local_wheel="$(ls -1 "$PREFIX"/dist/pg_intelligence-*.whl | sort -V | tail -1)"
+  if compgen -G "$PREFIX/dist/pg_intelligence-${VERSION}-*.whl" >/dev/null; then
+    local_wheel="$(ls -1 "$PREFIX"/dist/pg_intelligence-${VERSION}-*.whl | sort -V | tail -1)"
+  elif compgen -G "$PREFIX/dist/pg_intelligence-*.whl" >/dev/null; then
+    warn "Bundled wheel does not match installer version ${VERSION}; ignoring stale wheel(s)."
   fi
   if [[ -n "$local_wheel" ]]; then
     log "Installing PG Intelligence from bundled wheel: $(basename "$local_wheel")"
     "$PREFIX/venv/bin/python" -m pip install --quiet --upgrade "$local_wheel" || die "Python dependency installation failed. Ensure PyPI access for psycopg[binary] or preinstall it in the venv."
   else
-    log "Bundled wheel not found; installing from local source tree"
+    log "Installing PG Intelligence ${VERSION} from local source tree"
     "$PREFIX/venv/bin/python" -m pip install --quiet --upgrade --no-build-isolation "$PREFIX" || die "Python installation failed. Ensure setuptools and psycopg[binary] are available."
   fi
+  local installed_version
+  installed_version="$("$PREFIX/venv/bin/python" -c 'import pgintel; print(pgintel.__version__)')"
+  [[ "$installed_version" == "$VERSION" ]] || die "Installed PG Intelligence version $installed_version does not match installer $VERSION."
   "$PREFIX/venv/bin/python" - <<'PY'
 import pgintel, psycopg, xml.parsers.expat
 print(f"PG Intelligence {pgintel.__version__}; psycopg {psycopg.__version__}")
@@ -426,7 +431,17 @@ bootstrap_interactively() {
   repo_admin_user="$(prompt_default 'Repository PostgreSQL administrator' "$source_admin_user")"
   read -r -s -p "Password for repository administrator ${repo_admin_user} (ENTER = reuse source admin password): " repo_admin_password; echo
   [[ -n "$repo_admin_password" ]] || repo_admin_password="$source_admin_password"
-  PGINTEL_SOURCE_ADMIN_PASSWORD="$source_admin_password"   PGINTEL_REPOSITORY_ADMIN_PASSWORD="$repo_admin_password"   PGINTEL_SOURCE_ROLE_PASSWORD="$source_role_password"   PGINTEL_REPOSITORY_ROLE_PASSWORD="$repo_role_password"     "$PREFIX/venv/bin/python" -m pgintel.bootstrap       -c "$CONFIG_DIR/pgintel.ini" --sql-dir "$PREFIX/sql"       --source-admin-user "$source_admin_user" --repository-admin-user "$repo_admin_user" ||       die "PostgreSQL bootstrap failed. Unrelated database objects were not intentionally modified."
+  env \
+    PGINTEL_SOURCE_ADMIN_PASSWORD="$source_admin_password" \
+    PGINTEL_REPOSITORY_ADMIN_PASSWORD="$repo_admin_password" \
+    PGINTEL_SOURCE_ROLE_PASSWORD="$source_role_password" \
+    PGINTEL_REPOSITORY_ROLE_PASSWORD="$repo_role_password" \
+    "$PREFIX/venv/bin/python" -m pgintel.bootstrap \
+      -c "$CONFIG_DIR/pgintel.ini" \
+      --sql-dir "$PREFIX/sql" \
+      --source-admin-user "$source_admin_user" \
+      --repository-admin-user "$repo_admin_user" || \
+      die "PostgreSQL bootstrap failed. Unrelated database objects were not intentionally modified."
 }
 
 run_tests() {
