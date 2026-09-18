@@ -2,6 +2,7 @@ import unittest
 
 from pgintel.bootstrap import (
     _connection_target,
+    _host_key,
     _preload_contains,
     _same_cluster,
     _same_database,
@@ -24,6 +25,15 @@ class BootstrapSafetyTests(unittest.TestCase):
         self.assertTrue(_same_database(source, repo))
         repo["dbname"] = "pgintel"
         self.assertFalse(_same_database(source, repo))
+
+    def test_local_host_aliases_are_same_cluster(self):
+        self.assertEqual(_host_key("localhost"), "<local>")
+        self.assertEqual(_host_key("127.0.0.1"), "<local>")
+        self.assertEqual(_host_key("::1"), "<local>")
+        self.assertEqual(_host_key(""), "<local>")
+        left = {"host": "localhost", "port": "15333", "dbname": "erp", "user": "pgintel"}
+        right = {"host": "127.0.0.1", "port": "15333", "dbname": "pgintel", "user": "pgintel_repo"}
+        self.assertTrue(_same_cluster(left, right))
 
     def test_preload_parser(self):
         self.assertTrue(_preload_contains("pgaudit, pg_stat_statements", "pg_stat_statements"))
