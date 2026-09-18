@@ -1,6 +1,6 @@
 [project]
 name = "pg-intelligence"
-version = "0.1.4"
+version = "0.1.5"
 description = "Prototype PostgreSQL telemetry collector and deterministic analyzer"
 requires-python = ">=3.9"
 dependencies = [

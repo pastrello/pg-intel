@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect = sub.add_parser("collect", help="Run one production-safe collection cycle")
     collect.add_argument("--full", action="store_true", help="Also collect slow object statistics and relation sizes")
     sub.add_parser("run", help="Run the production-safe collection scheduler")
-    sub.add_parser("migrate-repository", help="Apply idempotent repository migration required by 0.1.4")
+    sub.add_parser("migrate-repository", help="Apply idempotent repository migrations")
     r = sub.add_parser("report", help="Print a workload text report")
     r.add_argument("--hours", type=int, default=24)
     h = sub.add_parser("health", help="Show collector overhead/health statistics")
@@ -63,7 +63,7 @@ def main(argv=None) -> int:
             return 0
         if args.command == "migrate-repository":
             migrate_repository(cfg)
-            print("Repository migration 0.1.4 applied successfully.")
+            print("Repository migrations applied successfully.")
             return 0
         if args.command == "report":
             with connect(cfg.repository.dsn) as conn:
