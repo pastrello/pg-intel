@@ -1,0 +1,19 @@
+[project]
+name = "pg-intelligence"
+version = "0.1.2"
+description = "Prototype PostgreSQL telemetry collector and deterministic analyzer"
+requires-python = ">=3.9"
+dependencies = [
+  "psycopg[binary]>=3.1,<4"
+]
+
+[project.scripts]
+pgintel = "pgintel.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["pgintel*"]
+exclude = ["sql*", "tests*"]
