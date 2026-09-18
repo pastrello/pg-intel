@@ -129,7 +129,7 @@ A sample `pgintel.service` is included for systemd. Create a non-login OS user `
 ## Security choices
 
 - Monitoring role uses `pg_monitor`, not PostgreSQL superuser.
-- Query text storage defaults to `false`; SHA-256 of the normalized statement text is retained for correlation.
+- Query text retrieval defaults to `none`; workload correlation uses PostgreSQL `queryid` plus database/user identity. A SHA-256 text hash is stored only when query text is explicitly retrieved (`events` or `all`).
 - No SQL supplied by the monitoring target is executed by the repository.
 - No automatic remediation exists in v0.1.
 - The repository contains operational metadata and must itself be protected and backed up appropriately.
