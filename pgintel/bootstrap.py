@@ -34,8 +34,15 @@ def _connection_target(dsn: str) -> dict[str, str]:
     }
 
 
+def _host_key(host: str) -> str:
+    normalized = host.strip().lower()
+    if normalized in {"", "localhost", "127.0.0.1", "::1"}:
+        return "<local>"
+    return normalized
+
+
 def _same_cluster(left: dict[str, str], right: dict[str, str]) -> bool:
-    return left["host"] == right["host"] and left["port"] == right["port"]
+    return _host_key(left["host"]) == _host_key(right["host"]) and left["port"] == right["port"]
 
 
 def _same_database(left: dict[str, str], right: dict[str, str]) -> bool:
@@ -220,6 +227,26 @@ def bootstrap_postgres(
         preload_ok = _preload_contains(preload_value, "pg_stat_statements")
         result["source"]["pg_stat_statements_preloaded"] = preload_ok
         result["source"]["pg_stat_statements_extension"] = extension_installed
+        with source_admin.cursor() as cur:
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_namespace n
+                    JOIN pg_class c ON c.relnamespace = n.oid
+                    WHERE n.nspname = 'pgintel'
+                      AND c.relname = 'instances'
+                      AND c.relkind IN ('r', 'p')
+                ) AS detected
+                """
+            )
+            repository_schema_detected = bool(cur.fetchone()["detected"])
+        result["source"]["repository_schema_detected"] = repository_schema_detected
+        if repository_schema_detected:
+            result["manual_steps"].append(
+                f"A PG Intelligence repository schema was detected inside monitored database "
+                f"{source['dbname']}; review it manually. Bootstrap will never remove it."
+            )
         if not preload_ok:
             result["manual_steps"].append(
                 "Add pg_stat_statements to shared_preload_libraries and restart PostgreSQL in a maintenance window."
