@@ -55,9 +55,9 @@ If omitted, detection is automatic.
 
 ## 1. Prepare the monitored PostgreSQL
 
-Review `sql/002_monitoring_role.sql`. Authentication/password is configured separately according to your PostgreSQL policy; the SQL intentionally contains no password.
+In 0.1.5 the guided installer can create the dedicated monitoring role, grant `pg_monitor` and grant `CONNECT` to the configured source database. Existing safe roles are preserved; the bootstrap refuses to take over a pre-existing role with elevated attributes.
 
-`pg_stat_statements` must be configured by PostgreSQL itself. Typical setup requires it in `shared_preload_libraries`, a PostgreSQL restart, then:
+`pg_stat_statements` remains deliberately manual because enabling it may require a PostgreSQL restart. Typical setup requires it in `shared_preload_libraries`, an approved restart, then:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
@@ -67,20 +67,9 @@ The prototype assumes one application database per agent configuration. Multi-da
 
 ## 2. Prepare the repository
 
-Create a dedicated database and role, for example:
+The 0.1.5 bootstrap can create the dedicated `pgintel_repo` role, the `pgintel` database, initialize `sql/001_repository.sql` and apply repository migrations automatically. If the database already exists with another owner, bootstrap stops instead of altering it.
 
-```sql
-CREATE ROLE pgintel_repo LOGIN PASSWORD 'CHANGE_ME';
-CREATE DATABASE pgintel OWNER pgintel_repo;
-```
-
-Then initialize the repository:
-
-```bash
-psql -d pgintel -f sql/001_repository.sql
-```
-
-## 3. Install on Rocky Linux 9/10
+## 3. Install on RHEL-compatible Linux 8/9/10
 
 Recommended guided installation:
 
@@ -88,7 +77,9 @@ Recommended guided installation:
 sudo ./install-rocky.sh --configure
 ```
 
-The installer creates the service account, virtualenv, protected configuration/`PGPASSFILE`, directories and systemd unit. It does **not** modify or restart the monitored PostgreSQL. After applying the SQL preparation steps, use `sudo ./install-rocky.sh --enable` to validate and start the service. See `docs/SEMI_PRODUCTION_HOWTO.md` for the complete procedure.
+The installer creates the service account, virtualenv, protected configuration/`PGPASSFILE`, directories and systemd unit. At the end of `--configure`, it offers an idempotent bootstrap for PG Intelligence-specific roles/grants and the repository. It never changes `shared_preload_libraries`, never restarts PostgreSQL and never creates the `pg_stat_statements` extension automatically.
+
+Installer targets are Rocky/RHEL/AlmaLinux-compatible 8, 9 and 10. CentOS 7 is legacy/best-effort; Ubuntu/Debian are not targets yet. See `docs/SEMI_PRODUCTION_HOWTO.md` for the complete procedure.
 
 ## 4. Validate
 
@@ -213,3 +204,37 @@ pgintel -c /etc/pgintel/pgintel.ini migrate-repository
 ```
 
 See `docs/PRODUCTION_SAFETY.md` for deployment guidance and the exact overhead controls.
+
+
+## 0.1.5 guided PostgreSQL bootstrap
+
+A fresh installation can now use one guided flow:
+
+```bash
+sudo ./install-rocky.sh --configure
+```
+
+After writing `pgintel.ini` and `pgpass`, accept the bootstrap prompt. The installer can create only the missing PG Intelligence objects:
+
+```text
+source cluster
+  pgintel role
+  + pg_monitor
+  + CONNECT on monitored database
+
+repository cluster
+  pgintel_repo role
+  pgintel database
+  pgintel.* schema/tables
+  repository migrations
+```
+
+Administrative passwords are used only for the bootstrap process and are not persisted in `pgintel.ini` or `pgpass`. Service passwords remain in the protected `PGPASSFILE`.
+
+The bootstrap intentionally stops instead of making risky assumptions when:
+- source and repository are configured as the same database;
+- source and repository use the same role on the same cluster;
+- an existing PG Intelligence role has elevated attributes;
+- an existing repository database is owned by another role.
+
+The remaining manual PostgreSQL step is `pg_stat_statements` preload/restart/extension creation.
