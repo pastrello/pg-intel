@@ -446,5 +446,4 @@ def render_text(report: dict[str, Any]) -> str:
     elif lifecycle.get("status") == "near_eol":
         lines.extend(["", "  NOTE: this PostgreSQL major is close to community end-of-life; migration planning is advisable."])
 
-    return "
-".join(lines)
+    return "\n".join(lines)
