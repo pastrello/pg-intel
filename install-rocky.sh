@@ -7,14 +7,14 @@ set -Eeuo pipefail
 #   - does not start a new service unless --enable is supplied
 #   - keeps DB passwords out of pgintel.ini via PGPASSFILE
 
-VERSION="0.1.4"
+VERSION="0.1.5"
 PREFIX="${PREFIX:-/opt/pg-intelligence}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/pgintel}"
 STATE_DIR="${STATE_DIR:-/var/lib/pgintel}"
 LOG_DIR="${LOG_DIR:-/var/log/pgintel}"
 SERVICE_USER="${SERVICE_USER:-pgintel}"
 SERVICE_GROUP="${SERVICE_GROUP:-pgintel}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_BIN="${PYTHON_BIN:-}"
 SERVICE_NAME="pgintel.service"
 
 INSTALL_DEPS=1
@@ -24,6 +24,12 @@ FORCE_CONFIG=0
 RUN_TESTS=1
 ASSESS_CAPABILITIES=0
 MIGRATE_REPOSITORY=0
+BOOTSTRAP_POSTGRES=0
+
+OS_ID="unknown"
+OS_MAJOR=""
+CONFIG_SOURCE_PASSWORD=""
+CONFIG_REPO_PASSWORD=""
 
 log() { printf '[pgintel-installer] %s\n' "$*"; }
 warn() { printf '[pgintel-installer] WARNING: %s\n' "$*" >&2; }
@@ -38,7 +44,12 @@ Usage:
 
 Options:
   --configure       Ask for source/repository connection settings and write
-                    pgintel.ini + /etc/pgintel/pgpass interactively.
+                    pgintel.ini + /etc/pgintel/pgpass interactively. At the
+                    end, offer an idempotent PostgreSQL bootstrap.
+  --bootstrap-postgres
+                    Create missing PG Intelligence roles/repository database/schema
+                    and apply repository migrations. Existing unrelated objects are
+                    not overwritten. pg_stat_statements remains a manual step.
   --enable          Run 'pgintel check' and, only if successful, enable/start
                     the systemd service.
   --assess          Detect PostgreSQL version/capabilities and print missing
@@ -58,14 +69,15 @@ Environment overrides:
 Recommended first installation:
   sudo ./install-rocky.sh --configure
 
-After applying the PostgreSQL SQL steps from docs/SEMI_PRODUCTION_HOWTO.md:
-  sudo ./install-rocky.sh --enable
+Supported installer targets: RHEL-compatible 8, 9 and 10.
+CentOS 7 is legacy/best-effort. Ubuntu/Debian are out of scope for now.
 USAGE
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --configure) INTERACTIVE_CONFIG=1 ;;
+    --bootstrap-postgres) BOOTSTRAP_POSTGRES=1 ;;
     --enable) ENABLE_SERVICE=1 ;;
     --assess) ASSESS_CAPABILITIES=1 ;;
     --migrate-repository) MIGRATE_REPOSITORY=1 ;;
@@ -84,33 +96,78 @@ done
 if [[ -r /etc/os-release ]]; then
   # shellcheck disable=SC1091
   . /etc/os-release
-  case "${ID:-}" in
+  OS_ID="${ID:-unknown}"
+  OS_MAJOR="${VERSION_ID%%.*}"
+  case "$OS_ID" in
     rocky|rhel|almalinux|centos) ;;
-    *) warn "OS '${ID:-unknown}' was not explicitly tested; continuing." ;;
+    *) warn "OS '$OS_ID' is not an installer target; continuing best-effort." ;;
   esac
+  if [[ "$OS_ID" =~ ^(rocky|rhel|almalinux|centos)$ && ! "$OS_MAJOR" =~ ^(8|9|10)$ ]]; then
+    warn "RHEL-family major '$OS_MAJOR' is outside the supported 8/9/10 installer matrix."
+  fi
 fi
 
-install_dependencies() {
-  local missing=()
-  command -v "$PYTHON_BIN" >/dev/null 2>&1 || missing+=(python3)
-  command -v systemctl >/dev/null 2>&1 || die "systemd/systemctl is required."
-
-  if (( ${#missing[@]} > 0 )); then
-    (( INSTALL_DEPS == 1 )) || die "Missing packages/tools: ${missing[*]} (--no-dnf selected)."
-    command -v dnf >/dev/null 2>&1 || die "dnf not found; install Python 3 manually."
-    log "Installing required OS packages: ${missing[*]} python3-pip"
-    dnf -y install "${missing[@]}" python3-pip
-  elif ! "$PYTHON_BIN" -m pip --version >/dev/null 2>&1; then
-    (( INSTALL_DEPS == 1 )) || die "python3-pip is missing (--no-dnf selected)."
-    command -v dnf >/dev/null 2>&1 || die "dnf not found; install python3-pip manually."
-    log "Installing python3-pip"
-    dnf -y install python3-pip
-  fi
-
-  "$PYTHON_BIN" - <<'PY' || die "Python 3.9 or newer is required."
+python_is_usable() {
+  local bin="$1"
+  command -v "$bin" >/dev/null 2>&1 || return 1
+  "$bin" - <<'PY' >/dev/null 2>&1
 import sys
 raise SystemExit(0 if sys.version_info >= (3, 9) else 1)
 PY
+}
+
+select_python() {
+  if [[ -n "$PYTHON_BIN" ]]; then
+    python_is_usable "$PYTHON_BIN" || die "PYTHON_BIN=$PYTHON_BIN is missing or older than Python 3.9."
+    return
+  fi
+  local candidate
+  for candidate in python3 python3.12 python3.11 python3.10 python3.9; do
+    if python_is_usable "$candidate"; then
+      PYTHON_BIN="$candidate"
+      return
+    fi
+  done
+  (( INSTALL_DEPS == 1 )) || die "Python 3.9+ is required (--no-dnf selected)."
+  command -v dnf >/dev/null 2>&1 || die "dnf not found; install Python 3.9+ manually."
+  if [[ "$OS_MAJOR" == "8" ]]; then
+    log "Installing Python 3.12 runtime for RHEL-family 8"
+    dnf -y install python3.12 python3.12-pip python3.12-pip-wheel
+  else
+    log "Installing Python 3 runtime"
+    dnf -y install python3 python3-pip
+  fi
+  for candidate in python3 python3.12 python3.11 python3.10 python3.9; do
+    if python_is_usable "$candidate"; then
+      PYTHON_BIN="$candidate"
+      return
+    fi
+  done
+  die "Could not locate a usable Python 3.9+ runtime after package installation."
+}
+
+install_dependencies() {
+  command -v systemctl >/dev/null 2>&1 || die "systemd/systemctl is required."
+  select_python
+  log "OS detected: ${OS_ID} ${OS_MAJOR:-unknown}; runtime selected: $($PYTHON_BIN --version 2>&1)"
+  if ! "$PYTHON_BIN" -c 'import ssl, xml.parsers.expat' >/dev/null 2>&1; then
+    if (( INSTALL_DEPS == 1 )) && [[ "$OS_MAJOR" == "8" && "$(basename "$(command -v "$PYTHON_BIN")")" == "python3.12" ]]; then
+      log "Repairing Python 3.12 runtime dependencies (expat/python3.12-libs)"
+      dnf -y upgrade expat python3.12 python3.12-libs
+    fi
+  fi
+  "$PYTHON_BIN" -c 'import ssl, xml.parsers.expat' >/dev/null 2>&1 || die "Python runtime is inconsistent (ssl/pyexpat import failed). Update distro Python/expat packages first."
+  if ! "$PYTHON_BIN" -m pip --version >/dev/null 2>&1; then
+    (( INSTALL_DEPS == 1 )) || die "pip is missing for $PYTHON_BIN (--no-dnf selected)."
+    if [[ "$(basename "$(command -v "$PYTHON_BIN")")" == "python3.12" && "$OS_MAJOR" == "8" ]]; then
+      log "Installing Python 3.12 pip bootstrap packages"
+      dnf -y install python3.12-pip python3.12-pip-wheel
+    else
+      log "Installing python3-pip"
+      dnf -y install python3-pip
+    fi
+  fi
+  "$PYTHON_BIN" -m pip --version >/dev/null 2>&1 || die "pip is not functional for $PYTHON_BIN."
 }
 
 ensure_service_account() {
@@ -175,29 +232,35 @@ PGPASS
   chmod 0600 "$CONFIG_DIR/pgpass"
 }
 
-install_python() {
-  if [[ ! -x "$PREFIX/venv/bin/python" ]]; then
-    log "Creating Python virtual environment"
-    "$PYTHON_BIN" -m venv "$PREFIX/venv" || die "Could not create venv. Verify the Python venv module is installed."
+create_venv() {
+  rm -rf "$PREFIX/venv"
+  log "Creating Python virtual environment with $PYTHON_BIN"
+  if "$PYTHON_BIN" -m venv "$PREFIX/venv"; then
+    return 0
   fi
+  warn "Standard venv bootstrap failed; retrying without ensurepip."
+  rm -rf "$PREFIX/venv"
+  "$PYTHON_BIN" -m venv --without-pip "$PREFIX/venv" || return 1
+  "$PYTHON_BIN" -m pip --python "$PREFIX/venv" install --quiet pip || return 1
+}
 
+install_python() {
+  if [[ ! -x "$PREFIX/venv/bin/python" ]] || ! "$PREFIX/venv/bin/python" -m pip --version >/dev/null 2>&1; then
+    create_venv || die "Could not create a functional venv with pip. Verify distro Python/venv/pip packages."
+  fi
   local local_wheel=""
   if compgen -G "$PREFIX/dist/pg_intelligence-*.whl" >/dev/null; then
     local_wheel="$(ls -1 "$PREFIX"/dist/pg_intelligence-*.whl | sort -V | tail -1)"
   fi
-
   if [[ -n "$local_wheel" ]]; then
     log "Installing PG Intelligence from bundled wheel: $(basename "$local_wheel")"
-    "$PREFIX/venv/bin/python" -m pip install --quiet --upgrade "$local_wheel" || \
-      die "Python dependency installation failed. Ensure PyPI access for psycopg[binary] or preinstall it in the venv."
+    "$PREFIX/venv/bin/python" -m pip install --quiet --upgrade "$local_wheel" || die "Python dependency installation failed. Ensure PyPI access for psycopg[binary] or preinstall it in the venv."
   else
     log "Bundled wheel not found; installing from local source tree"
-    "$PREFIX/venv/bin/python" -m pip install --quiet --upgrade --no-build-isolation "$PREFIX" || \
-      die "Python installation failed. Ensure setuptools and psycopg[binary] are available."
+    "$PREFIX/venv/bin/python" -m pip install --quiet --upgrade --no-build-isolation "$PREFIX" || die "Python installation failed. Ensure setuptools and psycopg[binary] are available."
   fi
-
-  "$PREFIX/venv/bin/python" - <<PY
-import pgintel, psycopg
+  "$PREFIX/venv/bin/python" - <<'PY'
+import pgintel, psycopg, xml.parsers.expat
 print(f"PG Intelligence {pgintel.__version__}; psycopg {psycopg.__version__}")
 PY
 }
@@ -332,7 +395,36 @@ EOF_CFG
   fi
   chown "$SERVICE_USER":"$SERVICE_GROUP" "$CONFIG_DIR/pgpass"
   chmod 0600 "$CONFIG_DIR/pgpass"
+  CONFIG_SOURCE_PASSWORD="$source_password"
+  CONFIG_REPO_PASSWORD="$repo_password"
   log "Configuration written. Existing pgintel.ini was backed up when present."
+}
+
+prompt_yes_no() {
+  local prompt="$1" default="${2:-y}" answer suffix
+  [[ "$default" == "y" ]] && suffix="Y/n" || suffix="y/N"
+  read -r -p "$prompt [$suffix]: " answer
+  answer="${answer:-$default}"
+  [[ "$answer" =~ ^[Yy]$ ]]
+}
+
+bootstrap_interactively() {
+  local source_role_password="${1:-}" repo_role_password="${2:-}"
+  local source_admin_user source_admin_password repo_admin_user repo_admin_password
+  log "PostgreSQL bootstrap changes only PG Intelligence roles, grants, repository DB/schema and migrations."
+  log "It will NOT change shared_preload_libraries, create pg_stat_statements, or restart PostgreSQL."
+  if [[ -z "$source_role_password" ]]; then
+    read -r -s -p "Password to use if monitoring role must be created (ENTER if it already exists): " source_role_password; echo
+  fi
+  if [[ -z "$repo_role_password" ]]; then
+    read -r -s -p "Password to use if repository role must be created (ENTER if it already exists): " repo_role_password; echo
+  fi
+  source_admin_user="$(prompt_default 'Source PostgreSQL administrator' 'postgres')"
+  read -r -s -p "Password for source administrator ${source_admin_user} (ENTER for passwordless auth): " source_admin_password; echo
+  repo_admin_user="$(prompt_default 'Repository PostgreSQL administrator' "$source_admin_user")"
+  read -r -s -p "Password for repository administrator ${repo_admin_user} (ENTER = reuse source admin password): " repo_admin_password; echo
+  [[ -n "$repo_admin_password" ]] || repo_admin_password="$source_admin_password"
+  PGINTEL_SOURCE_ADMIN_PASSWORD="$source_admin_password"   PGINTEL_REPOSITORY_ADMIN_PASSWORD="$repo_admin_password"   PGINTEL_SOURCE_ROLE_PASSWORD="$source_role_password"   PGINTEL_REPOSITORY_ROLE_PASSWORD="$repo_role_password"     "$PREFIX/venv/bin/python" -m pgintel.bootstrap       -c "$CONFIG_DIR/pgintel.ini" --sql-dir "$PREFIX/sql"       --source-admin-user "$source_admin_user" --repository-admin-user "$repo_admin_user" ||       die "PostgreSQL bootstrap failed. Unrelated database objects were not intentionally modified."
 }
 
 run_tests() {
@@ -342,7 +434,7 @@ run_tests() {
 }
 
 migrate_repository_schema() {
-  log "Applying PG Intelligence repository migration 0.1.4"
+  log "Applying PG Intelligence repository migrations"
   runuser -u "$SERVICE_USER" -- env PGPASSFILE="$CONFIG_DIR/pgpass" \
     "$PREFIX/venv/bin/pgintel" -c "$CONFIG_DIR/pgintel.ini" migrate-repository
 }
@@ -377,14 +469,21 @@ ensure_service_account
 install_files
 install_python
 write_systemd_unit
-(( INTERACTIVE_CONFIG == 1 )) && configure_interactively
+if (( INTERACTIVE_CONFIG == 1 )); then
+  configure_interactively
+  if (( BOOTSTRAP_POSTGRES == 1 )) || prompt_yes_no "Bootstrap PG Intelligence roles/repository now?" "y"; then
+    bootstrap_interactively "$CONFIG_SOURCE_PASSWORD" "$CONFIG_REPO_PASSWORD"
+  fi
+elif (( BOOTSTRAP_POSTGRES == 1 )); then
+  bootstrap_interactively
+fi
 run_tests
 
 if (( MIGRATE_REPOSITORY == 1 )); then
   migrate_repository_schema
 fi
 
-if (( ASSESS_CAPABILITIES == 1 || INTERACTIVE_CONFIG == 1 )); then
+if (( ASSESS_CAPABILITIES == 1 || INTERACTIVE_CONFIG == 1 || BOOTSTRAP_POSTGRES == 1 )); then
   assess_capabilities || true
 fi
 
