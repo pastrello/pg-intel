@@ -138,7 +138,7 @@ def _latest_rows(
                 SELECT DISTINCT ON ({column}) *
                 FROM pgintel.{table}
                 WHERE instance_id = %s
-                  AND {column} = ANY(%s)
+                  AND {column} = ANY(%s::oid[])
                 ORDER BY {column}, collected_at DESC
                 """,
                 (instance_id, values),
