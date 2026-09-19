@@ -164,10 +164,13 @@ CREATE TABLE IF NOT EXISTS pgintel.collection_cycles (
     budget_exceeded     boolean NOT NULL DEFAULT false,
     database_rows       integer NOT NULL DEFAULT 0,
     table_rows          integer NOT NULL DEFAULT 0,
+    table_rows_stored   integer NOT NULL DEFAULT 0,
     index_rows          integer NOT NULL DEFAULT 0,
+    index_rows_stored   integer NOT NULL DEFAULT 0,
     query_rows_seen     integer NOT NULL DEFAULT 0,
     query_rows_stored   integer NOT NULL DEFAULT 0,
     events_created      integer NOT NULL DEFAULT 0,
+    events_suppressed   integer NOT NULL DEFAULT 0,
     collector_ms        jsonb NOT NULL DEFAULT '{}'::jsonb,
     notes               jsonb NOT NULL DEFAULT '{}'::jsonb
 );
