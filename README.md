@@ -240,3 +240,56 @@ The bootstrap intentionally stops instead of making risky assumptions when:
 If a repository-shaped `pgintel.instances` table is detected inside the monitored source database, bootstrap reports it as a manual cleanup item and never removes it automatically.
 
 The remaining manual PostgreSQL step is `pg_stat_statements` preload/restart/extension creation.
+
+
+## 0.1.6 database isolation and repository efficiency
+
+Version 0.1.6 incorporates findings from the first long-running 0.1.5 telemetry test.
+
+The configured source database is now the workload boundary:
+
+```text
+server_samples       cluster-wide by design
+database_samples     configured source database only
+query_samples        configured source database only
+table_samples        configured source database only
+index_samples        configured source database only
+events               derived from that scoped workload
+```
+
+This prevents a co-located `pgintel` repository database from appearing in application cache-hit, transaction and top-query reports.
+
+Repository writes are also reduced. Table/index/query collectors load previous state in batches, and unchanged table/index snapshots are no longer persisted after their baseline. The health report exposes the effect:
+
+```bash
+pgintel -c /etc/pgintel/pgintel.ini health --hours 24
+```
+
+It now reports rows seen/stored, event suppression and FAST/SLOW/SIZE timing separately.
+
+Existing repositories must be migrated before collection:
+
+```bash
+pgintel -c /etc/pgintel/pgintel.ini migrate-repository
+```
+
+or through the installer:
+
+```bash
+sudo ./install-rocky.sh --bootstrap-postgres
+```
+
+Persistent event types use a default one-hour cooldown:
+
+```ini
+[analysis]
+event_cooldown_seconds = 3600
+```
+
+For explicit investigation without retaining query text:
+
+```bash
+pgintel -c /etc/pgintel/pgintel.ini inspect-query -6228523012605166543
+```
+
+`query_text_mode = none` remains the recommended normal operating mode.
