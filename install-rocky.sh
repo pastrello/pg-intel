@@ -9,7 +9,7 @@ set -Eeuo pipefail
 #   - does not start a new service unless --enable is supplied
 #   - keeps service/admin passwords out of pgintel.ini and command-line arguments
 
-VERSION="0.1.5"
+VERSION="0.1.6"
 PREFIX="${PREFIX:-/opt/pg-intelligence}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/pgintel}"
 STATE_DIR="${STATE_DIR:-/var/lib/pgintel}"
