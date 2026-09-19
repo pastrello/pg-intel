@@ -102,6 +102,11 @@ def _build_select(columns: Iterable[str], *, include_query_text: bool = False) -
             {optional['jit_generation_time']}
         FROM {source} AS s
         WHERE s.queryid IS NOT NULL
+          AND s.dbid = (
+              SELECT oid
+              FROM pg_database
+              WHERE datname = current_database()
+          )
     """
 
 
