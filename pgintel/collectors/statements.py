@@ -135,6 +135,36 @@ def collect(conn, *, include_query_text: bool = False):
         return cur.fetchall()
 
 
+def inspect_query(conn, queryid: int) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                s.dbid,
+                s.userid,
+                s.queryid,
+                s.toplevel,
+                s.calls,
+                s.total_exec_time,
+                CASE WHEN s.calls > 0 THEN s.total_exec_time / s.calls END AS mean_exec_time_ms,
+                s.rows,
+                s.shared_blks_hit,
+                s.shared_blks_read,
+                s.query
+            FROM pg_stat_statements(true) AS s
+            WHERE s.queryid = %s
+              AND s.dbid = (
+                  SELECT oid
+                  FROM pg_database
+                  WHERE datname = current_database()
+              )
+            ORDER BY s.calls DESC
+            """,
+            (queryid,),
+        )
+        return cur.fetchall()
+
+
 def fetch_query_texts(conn, keys: set[tuple[int, int, int]]) -> dict[tuple[int, int, int], str]:
     if not keys:
         return {}
