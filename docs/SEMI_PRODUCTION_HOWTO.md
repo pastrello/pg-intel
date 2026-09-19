@@ -1,4 +1,4 @@
-# PG Intelligence 0.1.5 — Semi-production HOW-TO
+# PG Intelligence 0.1.6 — Semi-production HOW-TO
 
 This procedure keeps application objects untouched, gives the source agent only observation privileges, and stores telemetry in a separate PostgreSQL database.
 
@@ -235,3 +235,56 @@ The SQL directory remains available for audit, troubleshooting or intentionally 
 ```
 
 For 0.1.5 guided installs, these no longer need to be applied manually except the deliberate `pg_stat_statements` extension step.
+
+
+## 11. Upgrade from 0.1.5 to 0.1.6
+
+Install the 0.1.6 code first. Existing configuration and `pgpass` are preserved.
+
+Apply the repository migration before restarting collection:
+
+```bash
+sudo -u pgintel env PGPASSFILE=/etc/pgintel/pgpass \
+  /opt/pg-intelligence/venv/bin/pgintel \
+  -c /etc/pgintel/pgintel.ini migrate-repository
+```
+
+or rerun the idempotent PostgreSQL bootstrap:
+
+```bash
+sudo ./install-rocky.sh --bootstrap-postgres
+```
+
+Then validate:
+
+```bash
+sudo -u pgintel env PGPASSFILE=/etc/pgintel/pgpass \
+  /opt/pg-intelligence/venv/bin/pgintel \
+  -c /etc/pgintel/pgintel.ini check
+```
+
+The output should include:
+
+```text
+source: true
+repository: true
+repository_schema_0_1_4: true
+repository_schema_0_1_6: true
+```
+
+For a clean 0.1.6 baseline while preserving 0.1.5 test history, change only the logical instance name, for example:
+
+```ini
+[agent]
+instance_name = rocky-replica-erp
+```
+
+The old `lab-pg18` instance and its samples remain available in the repository for before/after comparison.
+
+After at least one FAST cycle and one SLOW/SIZE cycle:
+
+```bash
+pgintel -c /etc/pgintel/pgintel.ini health --hours 24
+```
+
+Compare source/repository latency and table/index/query seen-vs-stored ratios with the preserved 0.1.5 measurements.
