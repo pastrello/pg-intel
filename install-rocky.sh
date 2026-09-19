@@ -536,6 +536,9 @@ Paths:
 New installations can use --configure to bootstrap the monitoring role,
 repository role/database/schema and repository migrations.
 
+Existing 0.1.5 repositories must run --migrate-repository or
+--bootstrap-postgres before the 0.1.6 collector is restarted.
+
 Manual PostgreSQL step intentionally retained:
   1. Add pg_stat_statements to shared_preload_libraries if needed.
   2. Restart PostgreSQL in an approved maintenance window if preload changed.
