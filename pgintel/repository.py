@@ -21,10 +21,13 @@ CREATE TABLE IF NOT EXISTS pgintel.collection_cycles (
     budget_exceeded     boolean NOT NULL DEFAULT false,
     database_rows       integer NOT NULL DEFAULT 0,
     table_rows          integer NOT NULL DEFAULT 0,
+    table_rows_stored   integer NOT NULL DEFAULT 0,
     index_rows          integer NOT NULL DEFAULT 0,
+    index_rows_stored   integer NOT NULL DEFAULT 0,
     query_rows_seen     integer NOT NULL DEFAULT 0,
     query_rows_stored   integer NOT NULL DEFAULT 0,
     events_created      integer NOT NULL DEFAULT 0,
+    events_suppressed   integer NOT NULL DEFAULT 0,
     collector_ms        jsonb NOT NULL DEFAULT '{}'::jsonb,
     notes               jsonb NOT NULL DEFAULT '{}'::jsonb
 );
@@ -32,6 +35,13 @@ CREATE TABLE IF NOT EXISTS pgintel.collection_cycles (
 COLLECTION_CYCLES_INDEX_DDL = """
 CREATE INDEX IF NOT EXISTS collection_cycles_instance_time_idx
     ON pgintel.collection_cycles(instance_id, collected_at DESC)
+"""
+
+REPOSITORY_EFFICIENCY_MIGRATION_DDL = """
+ALTER TABLE pgintel.collection_cycles
+    ADD COLUMN IF NOT EXISTS table_rows_stored integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS index_rows_stored integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS events_suppressed integer NOT NULL DEFAULT 0
 """
 
 
@@ -60,17 +70,29 @@ def repository_schema_info(conn) -> dict[str, bool]:
             """
             SELECT
                 to_regclass('pgintel.instances') IS NOT NULL AS core,
-                to_regclass('pgintel.collection_cycles') IS NOT NULL AS production_safety
+                to_regclass('pgintel.collection_cycles') IS NOT NULL AS production_safety,
+                (
+                    SELECT count(*) = 3
+                    FROM information_schema.columns
+                    WHERE table_schema = 'pgintel'
+                      AND table_name = 'collection_cycles'
+                      AND column_name IN ('table_rows_stored', 'index_rows_stored', 'events_suppressed')
+                ) AS repository_efficiency
             """
         )
         row = cur.fetchone()
-        return {"core": bool(row["core"]), "production_safety": bool(row["production_safety"])}
+        return {
+            "core": bool(row["core"]),
+            "production_safety": bool(row["production_safety"]),
+            "repository_efficiency": bool(row["repository_efficiency"]),
+        }
 
 
 def migrate_repository(conn) -> None:
     with conn.cursor() as cur:
         cur.execute(COLLECTION_CYCLES_TABLE_DDL)
         cur.execute(COLLECTION_CYCLES_INDEX_DDL)
+        cur.execute(REPOSITORY_EFFICIENCY_MIGRATION_DDL)
     conn.commit()
 
 
@@ -89,22 +111,37 @@ def insert_server_sample(conn, instance_id: int, sample: dict[str, Any]) -> None
         )
 
 
-def _last_row(conn, table: str, instance_id: int, key_sql: str, key_values: tuple[Any, ...]):
+def _latest_rows(conn, table: str, instance_id: int, key_columns: tuple[str, ...]) -> dict[tuple[Any, ...], dict[str, Any]]:
     allowed = {"database_samples", "table_samples", "index_samples", "query_samples"}
-    if table not in allowed:
-        raise ValueError("invalid table")
+    allowed_keys = {
+        "database_samples": {"datid"},
+        "table_samples": {"relid"},
+        "index_samples": {"indexrelid"},
+        "query_samples": {"dbid", "userid", "queryid"},
+    }
+    if table not in allowed or not key_columns or not set(key_columns) <= allowed_keys[table]:
+        raise ValueError("invalid latest-row lookup")
+    key_sql = ", ".join(key_columns)
     with conn.cursor() as cur:
         cur.execute(
-            f"SELECT * FROM pgintel.{table} WHERE instance_id = %s AND {key_sql} ORDER BY collected_at DESC LIMIT 1",
-            (instance_id, *key_values),
+            f"""
+            SELECT DISTINCT ON ({key_sql}) *
+            FROM pgintel.{table}
+            WHERE instance_id = %s
+            ORDER BY {key_sql}, collected_at DESC
+            """,
+            (instance_id,),
         )
-        return cur.fetchone()
+        rows = cur.fetchall()
+    return {tuple(row[column] for column in key_columns): row for row in rows}
 
 
 def insert_database_samples(conn, instance_id: int, collected_at, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    previous = _latest_rows(conn, "database_samples", instance_id, ("datid",))
     derived: list[dict[str, Any]] = []
+    payloads: list[dict[str, Any]] = []
     for row in rows:
-        prev = _last_row(conn, "database_samples", instance_id, "datid = %s", (row["datid"],))
+        prev = previous.get((row["datid"],))
         reset_changed = bool(prev and row["stats_reset"] != prev["stats_reset"])
 
         def d(raw_key: str, prev_col: str):
@@ -128,9 +165,12 @@ def insert_database_samples(conn, instance_id: int, collected_at, rows: list[dic
         if size is None and prev:
             size = prev["database_size_bytes"]
         materialized = {**row, **values, "database_size_bytes": size}
+        derived.append(materialized)
+        payloads.append({**materialized, "instance_id": instance_id, "collected_at": collected_at})
 
+    if payloads:
         with conn.cursor() as cur:
-            cur.execute(
+            cur.executemany(
                 """
                 INSERT INTO pgintel.database_samples (
                     instance_id, collected_at, datid, datname, numbackends, database_size_bytes, stats_reset,
@@ -147,16 +187,17 @@ def insert_database_samples(conn, instance_id: int, collected_at, rows: list[dic
                     %(temp_files_delta)s, %(temp_bytes_delta)s, %(deadlocks_delta)s, %(cache_hit_ratio)s
                 )
                 """,
-                {**materialized, "instance_id": instance_id, "collected_at": collected_at},
+                payloads,
             )
-        derived.append(materialized)
     return derived
 
 
 def insert_table_samples(conn, instance_id: int, collected_at, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    derived = []
+    previous = _latest_rows(conn, "table_samples", instance_id, ("relid",))
+    derived: list[dict[str, Any]] = []
+    payloads: list[dict[str, Any]] = []
     for row in rows:
-        prev = _last_row(conn, "table_samples", instance_id, "relid = %s", (row["relid"],))
+        prev = previous.get((row["relid"],))
         vals = {
             "seq_scan_delta": int(delta(row["seq_scan"], prev["seq_scan_raw"] if prev else None)),
             "idx_scan_delta": int(delta(row["idx_scan"] or 0, prev["idx_scan_raw"] if prev else None)),
@@ -171,8 +212,31 @@ def insert_table_samples(conn, instance_id: int, collected_at, rows: list[dict[s
         if size is None and prev:
             size = prev["total_size_bytes"]
         materialized = {**row, **vals, "total_size_bytes": size}
+
+        changed = prev is None or any((
+            row["seq_scan"] != prev["seq_scan_raw"],
+            (row["idx_scan"] or 0) != (prev["idx_scan_raw"] or 0),
+            row["n_tup_ins"] != prev["n_tup_ins_raw"],
+            row["n_tup_upd"] != prev["n_tup_upd_raw"],
+            row["n_tup_del"] != prev["n_tup_del_raw"],
+            live != int(prev["n_live_tup"] or 0),
+            dead != int(prev["n_dead_tup"] or 0),
+            row["n_mod_since_analyze"] != prev["n_mod_since_analyze"],
+            row["last_vacuum"] != prev["last_vacuum"],
+            row["last_autovacuum"] != prev["last_autovacuum"],
+            row["last_analyze"] != prev["last_analyze"],
+            row["last_autoanalyze"] != prev["last_autoanalyze"],
+            size != prev["total_size_bytes"],
+        ))
+        if not changed:
+            continue
+
+        derived.append(materialized)
+        payloads.append({**materialized, "instance_id": instance_id, "collected_at": collected_at})
+
+    if payloads:
         with conn.cursor() as cur:
-            cur.execute(
+            cur.executemany(
                 """
                 INSERT INTO pgintel.table_samples (
                     instance_id, collected_at, relid, schemaname, relname, total_size_bytes,
@@ -188,23 +252,42 @@ def insert_table_samples(conn, instance_id: int, collected_at, rows: list[dict[s
                     %(last_vacuum)s, %(last_autovacuum)s, %(last_analyze)s, %(last_autoanalyze)s
                 )
                 """,
-                {**materialized, "instance_id": instance_id, "collected_at": collected_at},
+                payloads,
             )
-        derived.append(materialized)
     return derived
 
 
 def insert_index_samples(conn, instance_id: int, collected_at, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    derived = []
+    previous = _latest_rows(conn, "index_samples", instance_id, ("indexrelid",))
+    derived: list[dict[str, Any]] = []
+    payloads: list[dict[str, Any]] = []
     for row in rows:
-        prev = _last_row(conn, "index_samples", instance_id, "indexrelid = %s", (row["indexrelid"],))
-        vals = {"idx_scan_delta": int(delta(row["idx_scan"] or 0, prev["idx_scan_raw"] if prev else None))}
+        prev = previous.get((row["indexrelid"],))
+        idx_scan = int(row["idx_scan"] or 0)
+        vals = {"idx_scan_delta": int(delta(idx_scan, prev["idx_scan_raw"] if prev else None))}
         size = row.get("index_size_bytes")
         if size is None and prev:
             size = prev["index_size_bytes"]
         materialized = {**row, **vals, "index_size_bytes": size}
+
+        changed = prev is None or any((
+            idx_scan != int(prev["idx_scan_raw"] or 0),
+            row["idx_tup_read"] != prev["idx_tup_read_raw"],
+            row["idx_tup_fetch"] != prev["idx_tup_fetch_raw"],
+            size != prev["index_size_bytes"],
+            row["indisunique"] != prev["indisunique"],
+            row["indisprimary"] != prev["indisprimary"],
+            row["indisvalid"] != prev["indisvalid"],
+        ))
+        if not changed:
+            continue
+
+        derived.append(materialized)
+        payloads.append({**materialized, "instance_id": instance_id, "collected_at": collected_at})
+
+    if payloads:
         with conn.cursor() as cur:
-            cur.execute(
+            cur.executemany(
                 """
                 INSERT INTO pgintel.index_samples (
                     instance_id, collected_at, indexrelid, relid, schemaname, relname, indexrelname,
@@ -216,9 +299,8 @@ def insert_index_samples(conn, instance_id: int, collected_at, rows: list[dict[s
                     %(idx_tup_read)s, %(idx_tup_fetch)s, %(indisunique)s, %(indisprimary)s, %(indisvalid)s
                 )
                 """,
-                {**materialized, "instance_id": instance_id, "collected_at": collected_at},
+                payloads,
             )
-        derived.append(materialized)
     return derived
 
 
@@ -230,13 +312,11 @@ def insert_query_samples(
     *,
     store_query_text: bool,
 ) -> list[dict[str, Any]]:
-    derived = []
+    previous = _latest_rows(conn, "query_samples", instance_id, ("dbid", "userid", "queryid"))
+    derived: list[dict[str, Any]] = []
+    payloads: list[dict[str, Any]] = []
     for row in rows:
-        prev = _last_row(
-            conn, "query_samples", instance_id,
-            "dbid = %s AND userid = %s AND queryid = %s",
-            (row["dbid"], row["userid"], row["queryid"]),
-        )
+        prev = previous.get((row["dbid"], row["userid"], row["queryid"]))
 
         def d(raw_key: str, prev_col: str):
             return delta(row[raw_key] or 0, prev[prev_col] if prev else None)
@@ -263,9 +343,13 @@ def insert_query_samples(
         query = row.get("query")
         vals["query_hash"] = sha256_text(query) if query else (prev["query_hash"] if prev else None)
         vals["query_text"] = query if store_query_text else None
+        materialized = {**row, **vals}
+        derived.append(materialized)
+        payloads.append({**materialized, "instance_id": instance_id, "collected_at": collected_at})
 
+    if payloads:
         with conn.cursor() as cur:
-            cur.execute(
+            cur.executemany(
                 """
                 INSERT INTO pgintel.query_samples (
                     instance_id, collected_at, dbid, userid, queryid, toplevel, query_hash, query_text,
@@ -284,9 +368,8 @@ def insert_query_samples(
                     %(temp_blks_written_delta)s, %(wal_bytes_delta)s, %(mean_exec_time_ms)s
                 )
                 """,
-                {**row, **vals, "instance_id": instance_id, "collected_at": collected_at},
+                payloads,
             )
-        derived.append({**row, **vals})
     return derived
 
 
@@ -314,13 +397,15 @@ def insert_collection_cycle(conn, instance_id: int, metrics: dict[str, Any]) -> 
             INSERT INTO pgintel.collection_cycles (
                 instance_id, collected_at, cycle_duration_ms, source_duration_ms, repository_duration_ms,
                 slow_requested, slow_collected, sizes_requested, sizes_collected, budget_exceeded,
-                database_rows, table_rows, index_rows, query_rows_seen, query_rows_stored, events_created,
+                database_rows, table_rows, table_rows_stored, index_rows, index_rows_stored,
+                query_rows_seen, query_rows_stored, events_created, events_suppressed,
                 collector_ms, notes
             ) VALUES (
                 %(instance_id)s, %(collected_at)s, %(cycle_duration_ms)s, %(source_duration_ms)s,
                 %(repository_duration_ms)s, %(slow_requested)s, %(slow_collected)s, %(sizes_requested)s,
                 %(sizes_collected)s, %(budget_exceeded)s, %(database_rows)s, %(table_rows)s,
-                %(index_rows)s, %(query_rows_seen)s, %(query_rows_stored)s, %(events_created)s,
+                %(table_rows_stored)s, %(index_rows)s, %(index_rows_stored)s,
+                %(query_rows_seen)s, %(query_rows_stored)s, %(events_created)s, %(events_suppressed)s,
                 %(collector_ms)s::jsonb, %(notes)s::jsonb
             )
             """,
