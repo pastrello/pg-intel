@@ -111,33 +111,68 @@ def insert_server_sample(conn, instance_id: int, sample: dict[str, Any]) -> None
         )
 
 
-def _latest_rows(conn, table: str, instance_id: int, key_columns: tuple[str, ...]) -> dict[tuple[Any, ...], dict[str, Any]]:
-    allowed = {"database_samples", "table_samples", "index_samples", "query_samples"}
+def _latest_rows(
+    conn,
+    table: str,
+    instance_id: int,
+    key_columns: tuple[str, ...],
+    keys: list[tuple[Any, ...]],
+) -> dict[tuple[Any, ...], dict[str, Any]]:
     allowed_keys = {
-        "database_samples": {"datid"},
-        "table_samples": {"relid"},
-        "index_samples": {"indexrelid"},
-        "query_samples": {"dbid", "userid", "queryid"},
+        "database_samples": ("datid",),
+        "table_samples": ("relid",),
+        "index_samples": ("indexrelid",),
+        "query_samples": ("dbid", "userid", "queryid"),
     }
-    if table not in allowed or not key_columns or not set(key_columns) <= allowed_keys[table]:
+    if allowed_keys.get(table) != key_columns:
         raise ValueError("invalid latest-row lookup")
-    key_sql = ", ".join(key_columns)
+    if not keys:
+        return {}
+
     with conn.cursor() as cur:
-        cur.execute(
-            f"""
-            SELECT DISTINCT ON ({key_sql}) *
-            FROM pgintel.{table}
-            WHERE instance_id = %s
-            ORDER BY {key_sql}, collected_at DESC
-            """,
-            (instance_id,),
-        )
+        if len(key_columns) == 1:
+            column = key_columns[0]
+            values = [key[0] for key in keys]
+            cur.execute(
+                f"""
+                SELECT DISTINCT ON ({column}) *
+                FROM pgintel.{table}
+                WHERE instance_id = %s
+                  AND {column} = ANY(%s)
+                ORDER BY {column}, collected_at DESC
+                """,
+                (instance_id, values),
+            )
+        else:
+            dbids = [key[0] for key in keys]
+            userids = [key[1] for key in keys]
+            queryids = [key[2] for key in keys]
+            cur.execute(
+                """
+                WITH wanted(dbid, userid, queryid) AS (
+                    SELECT *
+                    FROM unnest(%s::oid[], %s::oid[], %s::bigint[])
+                )
+                SELECT DISTINCT ON (q.dbid, q.userid, q.queryid) q.*
+                FROM pgintel.query_samples q
+                JOIN wanted w
+                  ON w.dbid = q.dbid
+                 AND w.userid = q.userid
+                 AND w.queryid = q.queryid
+                WHERE q.instance_id = %s
+                ORDER BY q.dbid, q.userid, q.queryid, q.collected_at DESC
+                """,
+                (dbids, userids, queryids, instance_id),
+            )
         rows = cur.fetchall()
     return {tuple(row[column] for column in key_columns): row for row in rows}
 
 
 def insert_database_samples(conn, instance_id: int, collected_at, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    previous = _latest_rows(conn, "database_samples", instance_id, ("datid",))
+    previous = _latest_rows(
+        conn, "database_samples", instance_id, ("datid",),
+        [(row["datid"],) for row in rows],
+    )
     derived: list[dict[str, Any]] = []
     payloads: list[dict[str, Any]] = []
     for row in rows:
@@ -193,7 +228,10 @@ def insert_database_samples(conn, instance_id: int, collected_at, rows: list[dic
 
 
 def insert_table_samples(conn, instance_id: int, collected_at, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    previous = _latest_rows(conn, "table_samples", instance_id, ("relid",))
+    previous = _latest_rows(
+        conn, "table_samples", instance_id, ("relid",),
+        [(row["relid"],) for row in rows],
+    )
     derived: list[dict[str, Any]] = []
     payloads: list[dict[str, Any]] = []
     for row in rows:
@@ -258,7 +296,10 @@ def insert_table_samples(conn, instance_id: int, collected_at, rows: list[dict[s
 
 
 def insert_index_samples(conn, instance_id: int, collected_at, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    previous = _latest_rows(conn, "index_samples", instance_id, ("indexrelid",))
+    previous = _latest_rows(
+        conn, "index_samples", instance_id, ("indexrelid",),
+        [(row["indexrelid"],) for row in rows],
+    )
     derived: list[dict[str, Any]] = []
     payloads: list[dict[str, Any]] = []
     for row in rows:
@@ -312,7 +353,10 @@ def insert_query_samples(
     *,
     store_query_text: bool,
 ) -> list[dict[str, Any]]:
-    previous = _latest_rows(conn, "query_samples", instance_id, ("dbid", "userid", "queryid"))
+    previous = _latest_rows(
+        conn, "query_samples", instance_id, ("dbid", "userid", "queryid"),
+        [(row["dbid"], row["userid"], row["queryid"]) for row in rows],
+    )
     derived: list[dict[str, Any]] = []
     payloads: list[dict[str, Any]] = []
     for row in rows:
