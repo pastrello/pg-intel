@@ -122,9 +122,51 @@ def analyze_query_regressions(repo_conn, instance_id: int, rows: list[dict[str, 
     return events
 
 
-def persist_events(conn, instance_id: int, events: list[Event]) -> None:
+_COOLDOWN_EVENT_TYPES = {
+    "low_cache_hit",
+    "high_dead_tuple_ratio",
+    "large_never_scanned_index",
+    "query_regression",
+}
+
+
+def persist_events(
+    conn,
+    instance_id: int,
+    events: list[Event],
+    *,
+    cooldown_seconds: int = 3600,
+) -> tuple[int, int]:
+    recent: set[tuple[str, str | None, str | None]] = set()
+    if cooldown_seconds > 0 and events:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT event_type, object_type, object_key
+                FROM pgintel.events
+                WHERE instance_id = %s
+                  AND created_at >= now() - (%s * interval '1 second')
+                  AND event_type = ANY(%s)
+                """,
+                (instance_id, cooldown_seconds, list(_COOLDOWN_EVENT_TYPES)),
+            )
+            recent = {
+                (row["event_type"], row["object_type"], row["object_key"])
+                for row in cur.fetchall()
+            }
+
+    created = 0
+    suppressed = 0
     for e in events:
+        key = (e.event_type, e.object_type, e.object_key)
+        if cooldown_seconds > 0 and e.event_type in _COOLDOWN_EVENT_TYPES and key in recent:
+            suppressed += 1
+            continue
         insert_event(
             conn, instance_id, e.severity, e.event_type, e.object_type, e.object_key,
             e.title, json.dumps(e.details, default=str),
         )
+        created += 1
+        if e.event_type in _COOLDOWN_EVENT_TYPES:
+            recent.add(key)
+    return created, suppressed
