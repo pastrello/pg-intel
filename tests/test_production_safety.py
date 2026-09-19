@@ -45,6 +45,7 @@ class ProductionSafetyTests(unittest.TestCase):
         self.assertEqual(cfg.slow_interval_seconds,900)
         self.assertEqual(cfg.size_interval_seconds,3600)
         self.assertEqual(cfg.query_text_mode,'none')
+        self.assertEqual(cfg.event_cooldown_seconds,3600)
     def test_legacy_store_query_text_true_maps_to_all(self):
         data='''[agent]\ninstance_name=x\nstore_query_text=true\n[source]\ndsn=x\n[repository]\ndsn=y\n'''
         with tempfile.TemporaryDirectory() as d:
