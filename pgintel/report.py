@@ -76,6 +76,7 @@ def health_report(conn, instance_name: str, hours: int = 24) -> str:
         inst = cur.fetchone()
         if not inst:
             raise ValueError(f"Unknown instance: {instance_name}")
+        iid = inst["id"]
         cur.execute(
             """
             SELECT
@@ -86,26 +87,64 @@ def health_report(conn, instance_name: str, hours: int = 24) -> str:
                 avg(source_duration_ms) AS avg_source_ms,
                 max(source_duration_ms) AS max_source_ms,
                 avg(repository_duration_ms) AS avg_repository_ms,
+                sum(table_rows) AS table_rows_seen,
+                sum(table_rows_stored) AS table_rows_stored,
+                sum(index_rows) AS index_rows_seen,
+                sum(index_rows_stored) AS index_rows_stored,
                 sum(query_rows_seen) AS query_rows_seen,
                 sum(query_rows_stored) AS query_rows_stored,
+                sum(events_created) AS events_created,
+                sum(events_suppressed) AS events_suppressed,
                 count(*) FILTER (WHERE budget_exceeded) AS budget_exceeded_cycles,
                 count(*) FILTER (WHERE slow_collected) AS slow_cycles,
                 count(*) FILTER (WHERE sizes_collected) AS size_cycles
             FROM pgintel.collection_cycles
             WHERE instance_id=%s AND collected_at >= now() - (%s * interval '1 hour')
             """,
-            (inst["id"], hours),
+            (iid, hours),
         )
         r = cur.fetchone()
+        cur.execute(
+            """
+            SELECT
+                CASE
+                    WHEN sizes_collected THEN 'SIZE'
+                    WHEN slow_collected THEN 'SLOW'
+                    ELSE 'FAST'
+                END AS cycle_class,
+                count(*) AS cycles,
+                avg(cycle_duration_ms) AS avg_cycle_ms,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY cycle_duration_ms) AS p95_cycle_ms,
+                max(cycle_duration_ms) AS max_cycle_ms,
+                avg(source_duration_ms) AS avg_source_ms,
+                avg(repository_duration_ms) AS avg_repository_ms
+            FROM pgintel.collection_cycles
+            WHERE instance_id=%s AND collected_at >= now() - (%s * interval '1 hour')
+            GROUP BY 1
+            """,
+            (iid, hours),
+        )
+        classes = cur.fetchall()
+
     if not r["cycles"]:
         return (
             f"PG Intelligence - Collector Health\nInstance : {instance_name}\n"
             f"No collection cycles in the last {hours} hour(s)."
         )
-    seen = int(r["query_rows_seen"] or 0)
-    stored = int(r["query_rows_stored"] or 0)
-    reduction = (1.0 - stored / seen) * 100.0 if seen else 0.0
-    return "\n".join([
+
+    def reduction(seen_value, stored_value) -> float:
+        seen = int(seen_value or 0)
+        stored = int(stored_value or 0)
+        return (1.0 - stored / seen) * 100.0 if seen else 0.0
+
+    query_seen = int(r["query_rows_seen"] or 0)
+    query_stored = int(r["query_rows_stored"] or 0)
+    table_seen = int(r["table_rows_seen"] or 0)
+    table_stored = int(r["table_rows_stored"] or 0)
+    index_seen = int(r["index_rows_seen"] or 0)
+    index_stored = int(r["index_rows_stored"] or 0)
+
+    lines = [
         "PG Intelligence - Collector Health",
         f"Instance              : {instance_name}",
         f"Window                : last {hours} hour(s)",
@@ -115,7 +154,20 @@ def health_report(conn, instance_name: str, hours: int = 24) -> str:
         f"Repository avg        : {float(r['avg_repository_ms']):.1f} ms",
         f"Budget exceeded       : {int(r['budget_exceeded_cycles'])} cycle(s)",
         f"Slow / size cycles    : {int(r['slow_cycles'])} / {int(r['size_cycles'])}",
-        f"Statements seen       : {seen:,}",
-        f"Statements stored     : {stored:,}",
-        f"Unchanged-row reduction: {reduction:.1f}%",
-    ])
+        f"Table rows seen/stored: {table_seen:,} / {table_stored:,} ({reduction(table_seen, table_stored):.1f}% reduction)",
+        f"Index rows seen/stored: {index_seen:,} / {index_stored:,} ({reduction(index_seen, index_stored):.1f}% reduction)",
+        f"Statements seen/stored: {query_seen:,} / {query_stored:,} ({reduction(query_seen, query_stored):.1f}% reduction)",
+        f"Events created/suppressed: {int(r['events_created'] or 0):,} / {int(r['events_suppressed'] or 0):,}",
+        "",
+        "CYCLE CLASSES",
+    ]
+
+    order = {"FAST": 0, "SLOW": 1, "SIZE": 2}
+    for row in sorted(classes, key=lambda item: order.get(item["cycle_class"], 99)):
+        lines.append(
+            f"  {row['cycle_class']:<4} cycles={int(row['cycles']):,} "
+            f"cycle avg/p95/max={float(row['avg_cycle_ms']):.1f}/{float(row['p95_cycle_ms']):.1f}/{float(row['max_cycle_ms']):.1f}ms "
+            f"source avg={float(row['avg_source_ms']):.1f}ms "
+            f"repo avg={float(row['avg_repository_ms']):.1f}ms"
+        )
+    return "\n".join(lines)

@@ -102,6 +102,11 @@ def _build_select(columns: Iterable[str], *, include_query_text: bool = False) -
             {optional['jit_generation_time']}
         FROM {source} AS s
         WHERE s.queryid IS NOT NULL
+          AND s.dbid = (
+              SELECT oid
+              FROM pg_database
+              WHERE datname = current_database()
+          )
     """
 
 
@@ -127,6 +132,42 @@ def collect(conn, *, include_query_text: bool = False):
     sql = _build_select(columns, include_query_text=include_query_text)
     with conn.cursor() as cur:
         cur.execute(sql)
+        return cur.fetchall()
+
+
+def inspect_query(conn, queryid: int) -> list[dict]:
+    columns = available_columns(conn)
+    missing = sorted(_REQUIRED_COLUMNS - columns)
+    if missing:
+        raise RuntimeError("pg_stat_statements is missing required columns: " + ", ".join(missing))
+    toplevel = _expr(columns, "toplevel", "toplevel", default_sql="true")
+    query = _expr(columns, "query", "query", default_sql="NULL::text")
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT
+                s.dbid,
+                s.userid,
+                s.queryid,
+                {toplevel},
+                s.calls,
+                s.total_exec_time,
+                CASE WHEN s.calls > 0 THEN s.total_exec_time / s.calls END AS mean_exec_time_ms,
+                s.rows,
+                s.shared_blks_hit,
+                s.shared_blks_read,
+                {query}
+            FROM pg_stat_statements(true) AS s
+            WHERE s.queryid = %s
+              AND s.dbid = (
+                  SELECT oid
+                  FROM pg_database
+                  WHERE datname = current_database()
+              )
+            ORDER BY s.calls DESC
+            """,
+            (queryid,),
+        )
         return cur.fetchall()
 
 

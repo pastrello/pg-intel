@@ -9,7 +9,7 @@ set -Eeuo pipefail
 #   - does not start a new service unless --enable is supplied
 #   - keeps service/admin passwords out of pgintel.ini and command-line arguments
 
-VERSION="0.1.5"
+VERSION="0.1.6"
 PREFIX="${PREFIX:-/opt/pg-intelligence}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/pgintel}"
 STATE_DIR="${STATE_DIR:-/var/lib/pgintel}"
@@ -535,6 +535,9 @@ Paths:
 
 New installations can use --configure to bootstrap the monitoring role,
 repository role/database/schema and repository migrations.
+
+Existing 0.1.5 repositories must run --migrate-repository or
+--bootstrap-postgres before the 0.1.6 collector is restarted.
 
 Manual PostgreSQL step intentionally retained:
   1. Add pg_stat_statements to shared_preload_libraries if needed.

@@ -130,3 +130,19 @@ pgintel -c /etc/pgintel/pgintel.ini health --hours 1
 ```
 
 The full inventory is intentionally explicit (`collect --full`) because it includes relation-size calls.
+
+
+## 0.1.6 repository-side efficiency controls
+
+The first 0.1.5 production-style run showed that source collection could remain very small while repository processing dominated cycle time. Version 0.1.6 addresses that observer-side cost without increasing work on the monitored database.
+
+Changes:
+
+- `pg_stat_database` and `pg_stat_statements` are scoped to the current source database.
+- previous table/index/query state is fetched in batch for only the keys present in the current cycle;
+- inserts use batched `executemany`;
+- unchanged table and index rows are not persisted after their baseline;
+- persistent events are cooldown-suppressed rather than repeatedly inserted;
+- FAST/SLOW/SIZE timings are reported separately.
+
+The repository migration adds accounting columns only; it does not rewrite historical telemetry. Historical 0.1.5 cycle rows therefore show zero for the new stored/suppressed counters. For clean comparison, use a new logical `instance_name` after upgrading.

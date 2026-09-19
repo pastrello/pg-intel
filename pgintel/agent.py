@@ -58,6 +58,7 @@ def check(cfg: AgentConfig) -> dict:
         "source": False,
         "repository": False,
         "repository_schema_0_1_4": False,
+        "repository_schema_0_1_6": False,
         "pg_stat_database_compatible": None,
         "pg_stat_statements": False,
         "pg_stat_statements_compatible": None,
@@ -67,6 +68,9 @@ def check(cfg: AgentConfig) -> dict:
         major = major_from_version_num(s["server_version_num"])
         support = assess_source(src, expected_major=cfg.source.expected_major)
         result["source"] = True
+        with src.cursor() as cur:
+            cur.execute("SELECT current_database() AS database")
+            result["source_database"] = cur.fetchone()["database"]
         result["server_version"] = s["server_version"]
         result["server_major"] = major
         result["supported_range"] = support["support"]["supported_range"]
@@ -93,6 +97,7 @@ def check(cfg: AgentConfig) -> dict:
         schema = repository_schema_info(repo)
         result["repository"] = schema["core"]
         result["repository_schema_0_1_4"] = schema["production_safety"]
+        result["repository_schema_0_1_6"] = schema["repository_efficiency"]
     return result
 
 
@@ -125,8 +130,8 @@ def _event_query_keys(events) -> set[tuple[int, int, int]]:
 def collect_once(
     cfg: AgentConfig,
     *,
-    collect_slow: bool = True,
-    collect_sizes: bool = True,
+    collect_slow: bool = False,
+    collect_sizes: bool = False,
 ) -> dict[str, Any]:
     collected_at = datetime.now(timezone.utc)
     cycle_started = time.monotonic()
@@ -135,9 +140,9 @@ def collect_once(
 
     with connect(cfg.source.dsn) as src, connect(cfg.repository.dsn) as repo:
         schema = repository_schema_info(repo)
-        if not schema["production_safety"]:
+        if not schema["production_safety"] or not schema["repository_efficiency"]:
             raise RuntimeError(
-                "Repository migration 0.1.4 is missing; run 'pgintel migrate-repository' before collection"
+                "Repository migration 0.1.6 is missing; run 'pgintel migrate-repository' before collection"
             )
 
         server_row = _timed(collector_ms, "source.server", lambda: server.collect(src))
@@ -239,7 +244,16 @@ def collect_once(
             elif keys:
                 notes["event_query_texts_skipped"] = "source cycle budget exceeded"
 
-        _timed(collector_ms, "repository.events", lambda: persist_events(repo, instance_id, events))
+        events_created, events_suppressed = _timed(
+            collector_ms,
+            "repository.events",
+            lambda: persist_events(
+                repo,
+                instance_id,
+                events,
+                cooldown_seconds=cfg.event_cooldown_seconds,
+            ),
+        )
         source_duration_ms = _source_duration_ms(collector_ms)
         repository_duration_ms = _repository_duration_ms(collector_ms)
         budget_exceeded = budget_exceeded or _budget_exceeded(collector_ms, cfg)
@@ -257,10 +271,13 @@ def collect_once(
             "budget_exceeded": budget_exceeded,
             "database_rows": len(db_rows),
             "table_rows": len(table_rows),
+            "table_rows_stored": len(derived_tables),
             "index_rows": len(index_rows),
+            "index_rows_stored": len(derived_indexes),
             "query_rows_seen": len(query_rows),
             "query_rows_stored": len(derived_queries),
-            "events_created": len(events),
+            "events_created": events_created,
+            "events_suppressed": events_suppressed,
             "collector_ms": collector_ms,
             "notes": notes,
         }
@@ -294,9 +311,12 @@ def run_forever(cfg: AgentConfig) -> None:
         try:
             result = collect_once(cfg, collect_slow=slow_due, collect_sizes=size_due)
             LOG.info(
-                "Collected PG%d: db=%d tables=%d indexes=%d queries=%d/%d events=%d source=%.1fms cycle=%.1fms budget_exceeded=%s",
-                result["server_major"], result["database_rows"], result["table_rows"], result["index_rows"],
-                result["query_rows_stored"], result["query_rows_seen"], result["events_created"],
+                "Collected PG%d: db=%d tables=%d/%d indexes=%d/%d queries=%d/%d events=%d suppressed=%d source=%.1fms cycle=%.1fms budget_exceeded=%s",
+                result["server_major"], result["database_rows"],
+                result["table_rows_stored"], result["table_rows"],
+                result["index_rows_stored"], result["index_rows"],
+                result["query_rows_stored"], result["query_rows_seen"],
+                result["events_created"], result["events_suppressed"],
                 result["source_duration_ms"], result["cycle_duration_ms"], result["budget_exceeded"],
             )
         except KeyboardInterrupt:

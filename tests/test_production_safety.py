@@ -17,6 +17,9 @@ class ProductionSafetyTests(unittest.TestCase):
     def test_size_database_collection_uses_size_function(self):
         sql=db_sql(set(DB_BASE),include_size=True)
         self.assertIn("pg_database_size(d.datid) AS database_size_bytes",sql)
+    def test_database_collection_is_scoped_to_current_database(self):
+        sql=db_sql(set(DB_BASE),include_size=False)
+        self.assertIn("WHERE d.datname = current_database()",sql)
     def test_table_fast_avoids_size_function(self):
         self.assertNotIn("pg_total_relation_size(s.relid) AS total_size_bytes",table_sql(include_size=False))
     def test_index_fast_avoids_size_function(self):
@@ -29,6 +32,10 @@ class ProductionSafetyTests(unittest.TestCase):
         sql=stmt_sql(STMT_BASE|{"query"},include_query_text=True)
         self.assertIn("FROM pg_stat_statements(true) AS s",sql)
         self.assertIn("s.query AS query",sql)
+    def test_statement_collection_is_scoped_to_current_database(self):
+        sql=stmt_sql(STMT_BASE,include_query_text=False)
+        self.assertIn("s.dbid = (",sql)
+        self.assertIn("datname = current_database()",sql)
     def test_config_defaults_are_production_conservative(self):
         data='''[agent]\ninstance_name=x\n[source]\ndsn=x\n[repository]\ndsn=y\n'''
         with tempfile.TemporaryDirectory() as d:
@@ -38,6 +45,7 @@ class ProductionSafetyTests(unittest.TestCase):
         self.assertEqual(cfg.slow_interval_seconds,900)
         self.assertEqual(cfg.size_interval_seconds,3600)
         self.assertEqual(cfg.query_text_mode,'none')
+        self.assertEqual(cfg.event_cooldown_seconds,3600)
     def test_legacy_store_query_text_true_maps_to_all(self):
         data='''[agent]\ninstance_name=x\nstore_query_text=true\n[source]\ndsn=x\n[repository]\ndsn=y\n'''
         with tempfile.TemporaryDirectory() as d:

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.6 - 2026-09-19
+
+- Scope `pg_stat_database` and `pg_stat_statements` telemetry to the database configured by the source DSN; cluster-level server activity remains intentionally cluster-wide.
+- Stop the repository database from contaminating application workload reports when source and repository share a PostgreSQL cluster.
+- Replace per-object previous-state lookups with current-key batched lookups and use `executemany` for repository writes.
+- Skip unchanged table and index snapshots after their first baseline while preserving the last known physical size.
+- Add table/index seen-vs-stored counters to `collection_cycles`.
+- Add a one-hour default cooldown for persistent events (cache-hit, dead tuples, large zero-scan indexes and query regressions); deadlocks and high temporary-I/O events remain unsuppressed.
+- Track created vs suppressed events in collector health.
+- Split `pgintel health` overhead into FAST, SLOW and SIZE cycle classes.
+- Add `pgintel inspect-query QUERYID` to retrieve current SQL text/metrics explicitly from the monitored database without retaining query text.
+- Add `sql/005_repository_efficiency.sql` and make `migrate-repository` apply the 0.1.6 repository accounting columns idempotently.
+- Make direct `collect_once()` calls production-safe by defaulting to FAST-only collection.
+
 ## 0.1.5 - 2026-09-18
 
 - Add an idempotent PostgreSQL bootstrap to the installer.

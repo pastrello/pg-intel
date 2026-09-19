@@ -9,6 +9,7 @@ from .agent import capability_report, check, collect_once, migrate_repository, r
 from .capabilities import render_text
 from .config import load_config
 from .db import connect
+from .collectors import statements
 from .report import health_report, text_report
 
 
@@ -28,6 +29,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--hours", type=int, default=24)
     h = sub.add_parser("health", help="Show collector overhead/health statistics")
     h.add_argument("--hours", type=int, default=24)
+    iq = sub.add_parser("inspect-query", help="Read current SQL text/metrics for one queryid from the source without storing it")
+    iq.add_argument("queryid", type=int)
     return p
 
 
@@ -42,7 +45,12 @@ def main(argv=None) -> int:
         if args.command == "check":
             result = check(cfg)
             print(json.dumps(result, indent=2, default=str))
-            ok = result["source"] and result["repository"] and result["repository_schema_0_1_4"]
+            ok = (
+                result["source"]
+                and result["repository"]
+                and result["repository_schema_0_1_4"]
+                and result["repository_schema_0_1_6"]
+            )
             ok = ok and result.get("pg_stat_database_compatible") is not False
             ok = ok and result.get("pgintel_support_level") != "unsupported"
             ok = ok and result.get("expected_major_match") is not False
@@ -73,6 +81,11 @@ def main(argv=None) -> int:
             with connect(cfg.repository.dsn) as conn:
                 print(health_report(conn, cfg.instance_name, args.hours))
             return 0
+        if args.command == "inspect-query":
+            with connect(cfg.source.dsn) as conn:
+                rows = statements.inspect_query(conn, args.queryid)
+            print(json.dumps(rows, indent=2, default=str))
+            return 0 if rows else 3
     except KeyboardInterrupt:
         return 130
     except Exception as exc:

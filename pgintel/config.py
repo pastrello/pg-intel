@@ -28,6 +28,7 @@ class AgentConfig:
     dead_tuple_ratio: float = 0.20
     temp_bytes_alert: int = 1_073_741_824
     large_unused_index_bytes: int = 1_073_741_824
+    event_cooldown_seconds: int = 3600
 
 
 def _require(cp: ConfigParser, section: str, key: str) -> str:
@@ -70,6 +71,10 @@ def load_config(path: str | Path) -> AgentConfig:
     if budget <= 0:
         raise ValueError("[collection] max_source_cycle_seconds must be > 0")
 
+    cooldown = cp.getint("analysis", "event_cooldown_seconds", fallback=3600)
+    if cooldown < 0:
+        raise ValueError("[analysis] event_cooldown_seconds must be >= 0")
+
     mode = _query_text_mode(cp)
     return AgentConfig(
         instance_name=_require(cp, "agent", "instance_name"),
@@ -90,4 +95,5 @@ def load_config(path: str | Path) -> AgentConfig:
         dead_tuple_ratio=cp.getfloat("analysis", "dead_tuple_ratio", fallback=0.20),
         temp_bytes_alert=cp.getint("analysis", "temp_bytes_alert", fallback=1_073_741_824),
         large_unused_index_bytes=cp.getint("analysis", "large_unused_index_bytes", fallback=1_073_741_824),
+        event_cooldown_seconds=cooldown,
     )

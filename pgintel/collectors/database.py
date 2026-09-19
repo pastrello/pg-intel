@@ -87,7 +87,7 @@ def _build_select(columns: set[str], *, include_size: bool = False) -> str:
                 d.stats_reset,
                 {size_expr} AS database_size_bytes
             FROM pg_stat_database d
-            WHERE d.datname IS NOT NULL
+            WHERE d.datname = current_database()
             ORDER BY d.datname
             """
 

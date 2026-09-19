@@ -287,6 +287,7 @@ def bootstrap_postgres(
         result["repository"]["schema_initialized"] = initialized
         result["repository"]["schema_core"] = info_after["core"]
         result["repository"]["schema_production_safety"] = info_after["production_safety"]
+        result["repository"]["schema_repository_efficiency"] = info_after["repository_efficiency"]
 
     return result
 
