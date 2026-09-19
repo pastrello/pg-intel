@@ -1,6 +1,7 @@
 import unittest
+from unittest.mock import patch
 
-from pgintel.analyzer import analyze_database, analyze_indexes, analyze_tables
+from pgintel.analyzer import Event, analyze_database, analyze_indexes, analyze_tables, persist_events
 from pgintel.config import AgentConfig, DbConfig
 
 
@@ -11,6 +12,22 @@ CFG = AgentConfig(
     temp_bytes_alert=1000,
     large_unused_index_bytes=1000,
 )
+
+
+class _CooldownCursor:
+    def __init__(self):
+        self.rows = [{
+            "event_type": "high_dead_tuple_ratio",
+            "object_type": "table",
+            "object_key": "public.t",
+        }]
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
+    def execute(self, sql, params=None): pass
+    def fetchall(self): return self.rows
+
+class _CooldownConn:
+    def cursor(self): return _CooldownCursor()
 
 
 class AnalyzerTests(unittest.TestCase):
@@ -33,6 +50,18 @@ class AnalyzerTests(unittest.TestCase):
                 "idx_scan": 0, "indisprimary": False, "indisunique": False}
         self.assertEqual(len(analyze_indexes([base], CFG)), 1)
         self.assertEqual(len(analyze_indexes([{**base, "indisunique": True}], CFG)), 0)
+
+    def test_persistent_event_is_suppressed_but_deadlock_is_not(self):
+        events = [
+            Event("warning", "high_dead_tuple_ratio", "table", "public.t", "dead tuples", {}),
+            Event("critical", "deadlock", "database", "erp", "deadlock", {}),
+        ]
+        with patch("pgintel.analyzer.insert_event") as insert:
+            created, suppressed = persist_events(_CooldownConn(), 1, events, cooldown_seconds=3600)
+        self.assertEqual(created, 1)
+        self.assertEqual(suppressed, 1)
+        self.assertEqual(insert.call_count, 1)
+        self.assertEqual(insert.call_args.args[2], "critical")
 
 
 if __name__ == "__main__":
