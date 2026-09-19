@@ -8,7 +8,7 @@ class FakeCursor:
     def __enter__(self): return self
     def __exit__(self,*a): return False
     def execute(self, sql, params=None):
-        if sql.lstrip().startswith("SELECT DISTINCT ON"):
+        if sql.lstrip().startswith("SELECT DISTINCT ON") or sql.lstrip().startswith("WITH wanted"):
             self._all=[self.conn.prev] if self.conn.prev else []
         elif "INSERT INTO pgintel.query_samples" in sql:
             self.conn.inserts.append(params); self.rowcount=1
