@@ -11,10 +11,10 @@ INIT = (ROOT / "pgintel" / "__init__.py").read_text(encoding="utf-8")
 
 class InstallerHotfixTests(unittest.TestCase):
     def test_application_version_has_dedicated_variable(self):
-        self.assertIn('PGINTEL_VERSION="0.1.7"', INSTALLER)
+        self.assertIn('PGINTEL_VERSION="0.1.8"', INSTALLER)
         self.assertIsNone(re.search(r"(?m)^VERSION=", INSTALLER))
-        self.assertIn('version = "0.1.7"', PYPROJECT)
-        self.assertIn('__version__ = "0.1.7"', INIT)
+        self.assertIn('version = "0.1.8"', PYPROJECT)
+        self.assertIn('__version__ = "0.1.8"', INIT)
 
     def test_os_release_is_not_sourced_into_installer_shell(self):
         self.assertNotIn("\n  . /etc/os-release\n", INSTALLER)
@@ -25,6 +25,9 @@ class InstallerHotfixTests(unittest.TestCase):
         self.assertIn('"setuptools>=68" wheel', INSTALLER)
         self.assertIn("-c 'import setuptools'", INSTALLER)
         self.assertIn("--no-build-isolation", INSTALLER)
+
+    def test_installer_is_copied_with_installed_test_tree(self):
+        self.assertIn('install -m 0755 install-rocky.sh "$PREFIX/install-rocky.sh"', INSTALLER)
 
 
 if __name__ == "__main__":
