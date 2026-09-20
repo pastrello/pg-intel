@@ -9,7 +9,7 @@ set -Eeuo pipefail
 #   - does not start a new service unless --enable is supplied
 #   - keeps service/admin passwords out of pgintel.ini and command-line arguments
 
-VERSION="0.1.6"
+PGINTEL_VERSION="0.1.7"
 PREFIX="${PREFIX:-/opt/pg-intelligence}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/pgintel}"
 STATE_DIR="${STATE_DIR:-/var/lib/pgintel}"
@@ -30,6 +30,7 @@ BOOTSTRAP_POSTGRES=0
 
 OS_ID="unknown"
 OS_MAJOR=""
+OS_VERSION_ID=""
 CONFIG_SOURCE_PASSWORD=""
 CONFIG_REPO_PASSWORD=""
 
@@ -39,7 +40,7 @@ die() { printf '[pgintel-installer] ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<USAGE
-PG Intelligence ${VERSION} - Rocky Linux installer
+PG Intelligence ${PGINTEL_VERSION} - Rocky Linux installer
 
 Usage:
   sudo ./install-rocky.sh [options]
@@ -96,10 +97,11 @@ done
 [[ -f pyproject.toml && -d pgintel && -d sql ]] || die "Run the installer from the project root."
 
 if [[ -r /etc/os-release ]]; then
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  OS_ID="${ID:-unknown}"
-  OS_MAJOR="${VERSION_ID%%.*}"
+  # Read OS metadata in isolated subshells so variables such as VERSION cannot
+  # overwrite installer state.
+  OS_ID="$(. /etc/os-release; printf '%s' "${ID:-unknown}")"
+  OS_VERSION_ID="$(. /etc/os-release; printf '%s' "${VERSION_ID:-}")"
+  OS_MAJOR="${OS_VERSION_ID%%.*}"
   case "$OS_ID" in
     rocky|rhel|almalinux|centos) ;;
     *) warn "OS '$OS_ID' is not an installer target; continuing best-effort." ;;
@@ -251,21 +253,27 @@ install_python() {
     create_venv || die "Could not create a functional venv with pip. Verify distro Python/venv/pip packages."
   fi
   local local_wheel=""
-  if compgen -G "$PREFIX/dist/pg_intelligence-${VERSION}-*.whl" >/dev/null; then
-    local_wheel="$(ls -1 "$PREFIX"/dist/pg_intelligence-${VERSION}-*.whl | sort -V | tail -1)"
+  if compgen -G "$PREFIX/dist/pg_intelligence-${PGINTEL_VERSION}-*.whl" >/dev/null; then
+    local_wheel="$(ls -1 "$PREFIX"/dist/pg_intelligence-${PGINTEL_VERSION}-*.whl | sort -V | tail -1)"
   elif compgen -G "$PREFIX/dist/pg_intelligence-*.whl" >/dev/null; then
-    warn "Bundled wheel does not match installer version ${VERSION}; ignoring stale wheel(s)."
+    warn "Bundled wheel does not match installer version ${PGINTEL_VERSION}; ignoring stale wheel(s)."
   fi
   if [[ -n "$local_wheel" ]]; then
     log "Installing PG Intelligence from bundled wheel: $(basename "$local_wheel")"
     "$PREFIX/venv/bin/python" -m pip install --quiet --upgrade "$local_wheel" || die "Python dependency installation failed. Ensure PyPI access for psycopg[binary] or preinstall it in the venv."
   else
-    log "Installing PG Intelligence ${VERSION} from local source tree"
-    "$PREFIX/venv/bin/python" -m pip install --quiet --upgrade --no-build-isolation "$PREFIX" || die "Python installation failed. Ensure setuptools and psycopg[binary] are available."
+    log "Bundled wheel for PG Intelligence ${PGINTEL_VERSION} not found; preparing local build backend"
+    "$PREFIX/venv/bin/python" -m pip install --quiet --upgrade "setuptools>=68" wheel || \
+      die "Could not install the local-source build backend (setuptools/wheel). Ensure PyPI access or preinstall these packages in the venv."
+    "$PREFIX/venv/bin/python" -c 'import setuptools' >/dev/null 2>&1 || \
+      die "setuptools is still unavailable inside the PG Intelligence venv."
+    log "Installing PG Intelligence ${PGINTEL_VERSION} from local source tree"
+    "$PREFIX/venv/bin/python" -m pip install --quiet --upgrade --no-build-isolation "$PREFIX" || \
+      die "Python installation failed. Ensure psycopg[binary] is available."
   fi
   local installed_version
   installed_version="$("$PREFIX/venv/bin/python" -c 'import pgintel; print(pgintel.__version__)')"
-  [[ "$installed_version" == "$VERSION" ]] || die "Installed PG Intelligence version $installed_version does not match installer $VERSION."
+  [[ "$installed_version" == "$PGINTEL_VERSION" ]] || die "Installed PG Intelligence version $installed_version does not match installer $PGINTEL_VERSION."
   "$PREFIX/venv/bin/python" - <<'PY'
 import pgintel, psycopg, xml.parsers.expat
 print(f"PG Intelligence {pgintel.__version__}; psycopg {psycopg.__version__}")
@@ -522,7 +530,7 @@ fi
 
 cat <<EOF_DONE
 
-PG Intelligence ${VERSION} installation completed.
+PG Intelligence ${PGINTEL_VERSION} installation completed.
 
 Paths:
   Application : $PREFIX
