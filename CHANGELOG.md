@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.8 - 2026-09-19
+
+- Fix bundled installer regression test failure after a successful clean install.
+- Copy `install-rocky.sh` into `/opt/pg-intelligence` alongside the bundled test tree so installer self-tests have the file they validate.
+- Keep the installed application directory self-contained enough to rerun installer validation from its deployed source copy.
+
 ## 0.1.7 - 2026-09-19
 
 - Fix installer application-version corruption caused by sourcing `/etc/os-release`, whose `VERSION` variable overwrote the PG Intelligence version on Rocky/RHEL systems.
