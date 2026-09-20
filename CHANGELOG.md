@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.7 - 2026-09-19
+
+- Fix installer application-version corruption caused by sourcing `/etc/os-release`, whose `VERSION` variable overwrote the PG Intelligence version on Rocky/RHEL systems.
+- Rename installer release state to `PGINTEL_VERSION` and read OS metadata in isolated subshells.
+- Fix clean source-tree installations where a newly created venv had pip but no setuptools build backend.
+- Before a local-source install, explicitly install and validate `setuptools>=68` and `wheel` inside the PG Intelligence venv.
+- Keep bundled-wheel installation preferred when a wheel matching the exact PG Intelligence version is present.
+
 ## 0.1.6 - 2026-09-19
 
 - Scope `pg_stat_database` and `pg_stat_statements` telemetry to the database configured by the source DSN; cluster-level server activity remains intentionally cluster-wide.
