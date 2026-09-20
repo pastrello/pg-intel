@@ -9,7 +9,7 @@ set -Eeuo pipefail
 #   - does not start a new service unless --enable is supplied
 #   - keeps service/admin passwords out of pgintel.ini and command-line arguments
 
-PGINTEL_VERSION="0.1.7"
+PGINTEL_VERSION="0.1.8"
 PREFIX="${PREFIX:-/opt/pg-intelligence}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/pgintel}"
 STATE_DIR="${STATE_DIR:-/var/lib/pgintel}"
@@ -209,6 +209,7 @@ install_files() {
     install -d -m 0755 -o root -g root "$PREFIX/dist"
   fi
   install -m 0644 pyproject.toml README.md CHANGELOG.md config.example.ini "$PREFIX/"
+  install -m 0755 install-rocky.sh "$PREFIX/install-rocky.sh"
 
   install -m 0640 -o root -g "$SERVICE_GROUP" config.example.ini "$CONFIG_DIR/pgintel.ini.example"
 
